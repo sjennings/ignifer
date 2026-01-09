@@ -1,6 +1,6 @@
 # Story 2.3: Time Range Support for Briefings
 
-Status: ready-for-dev
+Status: done
 
 ## Story
 
@@ -354,3 +354,322 @@ From GDELT adapter code review:
 | `tests/test_timeparse.py` | CREATE | Unit tests for parser |
 | `tests/adapters/test_gdelt.py` | MODIFY | Add time range tests |
 | `tests/test_server.py` | MODIFY | Add briefing time range tests |
+
+---
+
+## Senior Developer Review (AI)
+
+**Review Date:** 2026-01-09
+**Reviewer:** Claude (Adversarial Code Review)
+**Story:** 2-3 Time Range Support for Briefings
+
+---
+
+### Acceptance Criteria Coverage Analysis
+
+| AC | Status | Notes |
+|----|--------|-------|
+| AC1 | PASS | `briefing(topic: str, time_range: str \| None = None)` signature implemented, docstring updated |
+| AC2 | PASS | Natural language parsing works for hours/days/weeks/months, case-insensitive |
+| AC3 | PASS | ISO date range "YYYY-MM-DD to YYYY-MM-DD" implemented with validation |
+| AC4 | PASS | GDELT adapter uses timespan parameter correctly |
+| AC5 | PARTIAL | Default is "1week" but output does NOT indicate default time range (see Issue #1) |
+| AC6 | PASS | Invalid formats return helpful error with examples |
+| AC7 | PARTIAL | NO_DATA message does not suggest broader time range (see Issue #2) |
+| AC8 | PASS | Cache key includes time_range via `f"{params.query}:{timespan}"` |
+| AC9 | PASS | Tests cover parsing, GDELT integration, error cases |
+
+---
+
+### Issues Found
+
+#### Issue #1: AC5 Violation - Default Time Range Not Indicated in Output
+**Severity:** MEDIUM
+
+**Location:** `src/ignifer/output.py` line 112-113
+
+**Problem:** AC5 explicitly states "output indicates the default time range used" when no time_range is provided. However, the `_format_success` method only displays TIME RANGE when `time_range` is explicitly provided:
+
+```python
+if time_range:
+    lines.append(f"TIME RANGE: {time_range}")
+```
+
+When `time_range` is `None`, no indication is given that the default "Last 7 days" was applied.
+
+**Expected Behavior:** When `time_range=None`, output should show `TIME RANGE: Last 7 days (default)` to inform users what period is covered.
+
+**Fix Required:** Modify `output.py` to display default time range:
+```python
+if time_range:
+    lines.append(f"TIME RANGE: {time_range}")
+else:
+    lines.append("TIME RANGE: Last 7 days (default)")
+```
+
+---
+
+#### Issue #2: AC7 Violation - NO_DATA Message Missing Time Range Suggestion
+**Severity:** MEDIUM
+
+**Location:** `src/ignifer/output.py` lines 235-258
+
+**Problem:** AC7 explicitly requires "suggests trying a broader time range" when GDELT returns no results. The current `_format_no_data` method does NOT mention time ranges:
+
+```python
+def _format_no_data(self, result: OSINTResult) -> str:
+    ...
+    lines.append("### RECOMMENDED ACTIONS")
+    lines.append("")
+    lines.append(f"1. {suggestion}")
+    lines.append("2. Try more specific or alternative keywords")
+    lines.append("3. Verify spelling of names or locations")
+    lines.append("4. Use English terms for broader coverage")
+    lines.append("5. Expand temporal search range if available")  # Generic, not specific
+```
+
+The message "Expand temporal search range if available" is vague. AC7 requires explicitly suggesting a broader time range when a specific time range was used.
+
+**Expected Behavior:** When NO_DATA with a time_range, output should say something like "Try a broader time range (e.g., 'last 30 days' instead of 'last 24 hours')"
+
+**Fix Required:** The `_format_no_data` method needs to accept `time_range` parameter and provide specific suggestions when a time range was used.
+
+---
+
+#### Issue #3: Test Does Not Verify AC5 Fully
+**Severity:** LOW
+
+**Location:** `tests/test_server.py` lines 152-188
+
+**Problem:** The test `test_briefing_default_time_range` asserts that `TIME RANGE:` is NOT in the output when `time_range=None`:
+
+```python
+# Should not have TIME RANGE line when not specified
+assert "TIME RANGE:" not in result
+```
+
+This test is asserting the **wrong behavior**. According to AC5, the output SHOULD indicate the default time range. The test is validating the bug, not the requirement.
+
+**Fix Required:** After fixing Issue #1, update test to assert:
+```python
+assert "TIME RANGE: Last 7 days (default)" in result
+```
+
+---
+
+#### Issue #4: Cache Key Uses Raw User Input Instead of Normalized Value
+**Severity:** LOW
+
+**Location:** `src/ignifer/adapters/gdelt.py` lines 77-79
+
+**Problem:** The cache key uses `params.time_range or "1week"`:
+
+```python
+timespan = params.time_range or "1week"
+key = cache_key(self.source_name, "articles", search_query=f"{params.query}:{timespan}")
+```
+
+This means `"last 24 hours"`, `"LAST 24 HOURS"`, and `"Last 24 Hours"` would generate different cache keys despite producing the same API request (`timespan=24h`).
+
+**Impact:** Reduced cache efficiency - same query may hit API multiple times due to case differences.
+
+**Fix Required:** Use the parsed/normalized timespan value in cache key:
+```python
+time_result = parse_time_range(params.time_range) if params.time_range else None
+if time_result and time_result.gdelt_timespan:
+    cache_timespan = time_result.gdelt_timespan
+elif time_result and time_result.start_datetime:
+    cache_timespan = f"{time_result.start_datetime}-{time_result.end_datetime}"
+else:
+    cache_timespan = "1week"
+key = cache_key(self.source_name, "articles", search_query=f"{params.query}:{cache_timespan}")
+```
+
+---
+
+#### Issue #5: TimeRangeResult.is_valid Returns True for Empty Result
+**Severity:** LOW
+
+**Location:** `src/ignifer/timeparse.py` lines 31-34
+
+**Problem:** The test `test_time_range_result_is_valid_property` (line 158-159) reveals an edge case:
+
+```python
+empty_result = TimeRangeResult()
+assert empty_result.is_valid  # No error means valid
+```
+
+A `TimeRangeResult` with no `gdelt_timespan`, no `start_datetime`, and no `error` is considered "valid" but is actually useless - it provides no time filtering. This could lead to silent failures if parsing logic has a bug.
+
+**Impact:** If a regex pattern fails to capture groups properly, a result with all `None` fields except `error` would be considered valid.
+
+**Fix Required:** Strengthen the `is_valid` property:
+```python
+@property
+def is_valid(self) -> bool:
+    """Check if the result is valid and has actionable data."""
+    if self.error is not None:
+        return False
+    # Must have either timespan or date range
+    return self.gdelt_timespan is not None or self.start_datetime is not None
+```
+
+---
+
+#### Issue #6: "last week" Implementation May Be Off By One Day
+**Severity:** LOW
+
+**Location:** `src/ignifer/timeparse.py` lines 60-67
+
+**Problem:** The "last week" implementation calculates 7-14 days ago:
+
+```python
+if time_range.lower() == "last week":
+    now = datetime.now(timezone.utc)
+    start = now - timedelta(days=14)
+    end = now - timedelta(days=7)
+```
+
+This includes the current moment in the calculation. If "now" is Friday 10:00 AM:
+- `end` = Friday 10:00 AM last week (7 days ago)
+- `start` = Friday 10:00 AM two weeks ago (14 days ago)
+
+The problem is the `end` time cuts off at the exact moment 7 days ago, potentially excluding articles from "last week" that were published after that moment on the start day of "this week".
+
+**Impact:** User asking for "last week" on Friday 10 AM would miss articles from last Friday 10:01 AM to midnight.
+
+**Recommendation:** Consider setting `end` to the START of "this week" (Sunday/Monday 00:00:00 UTC) and `start` to the START of "last week" for more intuitive weekly boundaries. However, this is a design decision - current implementation is acceptable if documented.
+
+---
+
+### Summary
+
+| Severity | Count | Issues |
+|----------|-------|--------|
+| HIGH | 0 | - |
+| MEDIUM | 2 | #1 (AC5 default indicator), #2 (AC7 time range suggestion) |
+| LOW | 4 | #3 (test validates bug), #4 (cache key normalization), #5 (empty result valid), #6 (week boundary) |
+
+---
+
+### Final Outcome: **Changes Requested**
+
+The implementation is mostly complete and well-structured, but two MEDIUM severity issues directly violate acceptance criteria:
+
+1. **AC5 Violation:** Output must indicate default time range - currently silent
+2. **AC7 Violation:** NO_DATA message must suggest broader time range - currently generic
+
+**Required Fixes Before Approval:**
+1. Modify `output.py` `_format_success()` to display "Last 7 days (default)" when `time_range` is None
+2. Modify `output.py` `_format_no_data()` to accept `time_range` parameter and suggest broader ranges
+3. Update `test_server.py` `test_briefing_default_time_range` to verify default range appears in output
+
+**Recommended Improvements (not blocking):**
+- Normalize cache key to use parsed timespan value
+- Strengthen `TimeRangeResult.is_valid` to require actionable data
+
+---
+
+**Status:** Do NOT update sprint-status.yaml until fixes are applied.
+
+---
+
+## Follow-Up Review (Post-Fix Verification)
+
+**Review Date:** 2026-01-09
+**Reviewer:** Claude (Verification Review)
+**Story:** 2-3 Time Range Support for Briefings
+
+---
+
+### Fix Verification Summary
+
+All three requested fixes have been properly implemented:
+
+#### Fix #1: AC5 - Default Time Range Display (VERIFIED)
+**Location:** `src/ignifer/output.py` lines 112-115
+
+```python
+if time_range:
+    lines.append(f"TIME RANGE: {time_range}")
+else:
+    lines.append("TIME RANGE: Last 7 days (default)")
+```
+
+The output now correctly displays "TIME RANGE: Last 7 days (default)" when no time_range is provided.
+
+#### Fix #2: AC7 - NO_DATA Suggestion for Broader Time Range (VERIFIED)
+**Location:** `src/ignifer/output.py` lines 237-261
+
+```python
+def _format_no_data(self, result: OSINTResult, time_range: str | None = None) -> str:
+    ...
+    if time_range:
+        lines.append("5. Try a broader time range like 'last 30 days'")
+    else:
+        lines.append("5. Expand temporal search range if available")
+```
+
+The method now accepts `time_range` parameter and provides specific suggestions when a time_range was used.
+
+#### Fix #3: Test Update (VERIFIED)
+**Location:** `tests/test_server.py` lines 179-184
+
+```python
+result = await briefing.fn("Ukraine")
+
+# Should show default time range indicator
+assert "TIME RANGE:" in result
+assert "7 days" in result
+assert "default" in result.lower()
+```
+
+The test now correctly validates that the default time range IS shown in output.
+
+---
+
+### Test Results
+
+All tests pass:
+- `test_briefing_default_time_range` - PASSED
+- `test_briefing_with_time_range` - PASSED
+- `test_briefing_no_data_returns_suggestions` - PASSED
+- Full test suite: 158 tests PASSED
+
+---
+
+### Acceptance Criteria Final Status
+
+| AC | Status | Notes |
+|----|--------|-------|
+| AC1 | PASS | `briefing(topic: str, time_range: str \| None = None)` signature implemented |
+| AC2 | PASS | Natural language parsing works for hours/days/weeks/months |
+| AC3 | PASS | ISO date range "YYYY-MM-DD to YYYY-MM-DD" implemented |
+| AC4 | PASS | GDELT adapter uses timespan parameter correctly |
+| AC5 | PASS | Default time range now displayed in output (FIX APPLIED) |
+| AC6 | PASS | Invalid formats return helpful error with examples |
+| AC7 | PASS | NO_DATA now suggests broader time range (FIX APPLIED) |
+| AC8 | PASS | Cache key includes time_range |
+| AC9 | PASS | All tests pass (158/158) |
+
+---
+
+### Remaining Advisory Notes (Non-Blocking)
+
+The following low-severity items from the original review were not addressed but do not block approval:
+
+1. **Cache Key Uses Raw User Input** (Issue #4): Cache efficiency could be improved by normalizing time_range values before generating cache keys.
+
+2. **TimeRangeResult.is_valid Edge Case** (Issue #5): A `TimeRangeResult` with all None fields (except error) is considered valid. Consider strengthening validation.
+
+3. **"last week" Boundary Calculation** (Issue #6): Current implementation uses relative 7-14 day offset. Weekly boundary alignment could be more intuitive but current behavior is acceptable.
+
+These are recommended improvements for future maintenance.
+
+---
+
+### Final Outcome: **APPROVED**
+
+All MEDIUM severity issues have been resolved. The implementation now fully satisfies all acceptance criteria for Story 2-3: Time Range Support for Briefings.
+
+**Status:** Ready to update sprint-status.yaml to 'done'

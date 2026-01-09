@@ -80,7 +80,7 @@ class OutputFormatter:
         if result.status == ResultStatus.SUCCESS:
             return self._format_success(result, time_range)
         elif result.status == ResultStatus.NO_DATA:
-            return self._format_no_data(result)
+            return self._format_no_data(result, time_range)
         elif result.status == ResultStatus.RATE_LIMITED:
             return self._format_rate_limited(result)
         else:
@@ -111,6 +111,8 @@ class OutputFormatter:
         lines.append(f"DATE:  {timestamp}")
         if time_range:
             lines.append(f"TIME RANGE: {time_range}")
+        else:
+            lines.append("TIME RANGE: Last 7 days (default)")
         lines.append(DIVIDER_SECONDARY)
         lines.append("```")
         lines.append("")
@@ -232,7 +234,7 @@ class OutputFormatter:
 
         return "\n".join(lines)
 
-    def _format_no_data(self, result: OSINTResult) -> str:
+    def _format_no_data(self, result: OSINTResult, time_range: str | None = None) -> str:
         """Format no-data result with helpful suggestions."""
         query = result.query
         suggestion = result.error or "Try different search terms"
@@ -253,7 +255,10 @@ class OutputFormatter:
         lines.append("2. Try more specific or alternative keywords")
         lines.append("3. Verify spelling of names or locations")
         lines.append("4. Use English terms for broader coverage")
-        lines.append("5. Expand temporal search range if available")
+        if time_range:
+            lines.append("5. Try a broader time range like 'last 30 days'")
+        else:
+            lines.append("5. Expand temporal search range if available")
 
         return "\n".join(lines)
 

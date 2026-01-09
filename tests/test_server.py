@@ -151,7 +151,7 @@ class TestBriefingTool:
 
     @pytest.mark.asyncio
     async def test_briefing_default_time_range(self) -> None:
-        """Briefing without time_range uses default (no TIME RANGE line)."""
+        """Briefing without time_range shows default indicator."""
         mock_result = OSINTResult(
             status=ResultStatus.SUCCESS,
             query="Ukraine",
@@ -178,8 +178,10 @@ class TestBriefingTool:
 
             result = await briefing.fn("Ukraine")
 
-            # Should not have TIME RANGE line when not specified
-            assert "TIME RANGE:" not in result
+            # Should show default time range indicator
+            assert "TIME RANGE:" in result
+            assert "7 days" in result
+            assert "default" in result.lower()
             assert "UKRAINE" in result
 
             # Verify query was called with time_range=None
