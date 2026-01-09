@@ -49,4 +49,9 @@ dmypy.json
 # OS
 .DS_Store
 Thumbs.db
-_reference/TSUKUYOMI
+
+# Project directories
+.claude/
+_bmad-output/
+_bmad/
+_reference/
