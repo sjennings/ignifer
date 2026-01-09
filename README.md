@@ -1,8 +1,10 @@
 # Ignifer
 
-![Ignifer Logo](ignifer_logo.png)
+<p align="center">
+  <img src="ignifer_logo.png" alt="Ignifer Logo" width="400">
+</p>
 
-**OSINT MCP Server for Claude Desktop**
+<p align="center"><strong>OSINT MCP Server for Claude Desktop</strong></p>
 
 Ignifer is a Model Context Protocol (MCP) server that provides Claude Desktop with powerful Open Source Intelligence (OSINT) capabilities. It aggregates multiple authoritative data sources into a unified interface, enabling comprehensive intelligence briefings and economic analysis directly within your Claude conversations.
 
