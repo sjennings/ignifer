@@ -27,6 +27,23 @@ def load_fixture(name: str) -> dict:
 class TestWorldBankAdapter:
     """Tests for WorldBankAdapter class."""
 
+    # Sample country lookup for testing _parse_query directly
+    SAMPLE_COUNTRY_LOOKUP = {
+        "usa": "USA",
+        "us": "USA",
+        "united states": "USA",
+        "america": "USA",
+        "uk": "GBR",
+        "united kingdom": "GBR",
+        "britain": "GBR",
+        "germany": "DEU",
+        "deu": "DEU",
+        "eu": "EUU",
+        "european union": "EUU",
+        "sub-saharan africa": "SSF",
+        "ssa": "SSF",
+    }
+
     def test_source_name(self) -> None:
         """Source name is 'worldbank'."""
         adapter = WorldBankAdapter()
@@ -40,14 +57,18 @@ class TestWorldBankAdapter:
     def test_parse_query_gdp_usa(self) -> None:
         """Parse query extracts GDP indicator and USA country."""
         adapter = WorldBankAdapter()
-        indicator, country = adapter._parse_query("GDP United States")
+        indicator, country = adapter._parse_query(
+            "GDP United States", self.SAMPLE_COUNTRY_LOOKUP
+        )
         assert indicator == "NY.GDP.MKTP.CD"
         assert country == "USA"
 
     def test_parse_query_inflation_germany(self) -> None:
         """Parse query extracts inflation indicator and DEU country."""
         adapter = WorldBankAdapter()
-        indicator, country = adapter._parse_query("inflation Germany")
+        indicator, country = adapter._parse_query(
+            "inflation Germany", self.SAMPLE_COUNTRY_LOOKUP
+        )
         assert indicator == "FP.CPI.TOTL.ZG"
         assert country == "DEU"
 
@@ -57,37 +78,53 @@ class TestWorldBankAdapter:
 
         # Test various aliases for USA
         for alias in ["USA", "US", "United States", "America"]:
-            _, country = adapter._parse_query(f"GDP {alias}")
+            _, country = adapter._parse_query(
+                f"GDP {alias}", self.SAMPLE_COUNTRY_LOOKUP
+            )
             assert country == "USA", f"Failed for alias: {alias}"
 
         # Test UK aliases
         for alias in ["UK", "United Kingdom", "Britain"]:
-            _, country = adapter._parse_query(f"GDP {alias}")
+            _, country = adapter._parse_query(
+                f"GDP {alias}", self.SAMPLE_COUNTRY_LOOKUP
+            )
             assert country == "GBR", f"Failed for alias: {alias}"
 
     def test_parse_query_regional_aggregates(self) -> None:
         """Regional aggregates resolve correctly."""
         adapter = WorldBankAdapter()
 
-        _, country = adapter._parse_query("GDP European Union")
+        _, country = adapter._parse_query(
+            "GDP European Union", self.SAMPLE_COUNTRY_LOOKUP
+        )
         assert country == "EUU"
 
-        _, country = adapter._parse_query("GDP EU")
+        _, country = adapter._parse_query("GDP EU", self.SAMPLE_COUNTRY_LOOKUP)
         assert country == "EUU"
 
         # Sub-Saharan Africa (H1 fix verification)
-        _, country = adapter._parse_query("GDP Sub-Saharan Africa")
+        _, country = adapter._parse_query(
+            "GDP Sub-Saharan Africa", self.SAMPLE_COUNTRY_LOOKUP
+        )
         assert country == "SSF"
 
-        _, country = adapter._parse_query("GDP SSA")
+        _, country = adapter._parse_query("GDP SSA", self.SAMPLE_COUNTRY_LOOKUP)
         assert country == "SSF"
 
     def test_parse_query_unparseable_returns_none(self) -> None:
         """Unparseable queries return None for both fields."""
         adapter = WorldBankAdapter()
-        indicator, country = adapter._parse_query("random gibberish")
+        indicator, country = adapter._parse_query(
+            "random gibberish", self.SAMPLE_COUNTRY_LOOKUP
+        )
         assert indicator is None
         assert country is None
+
+    def _adapter_with_country_lookup(self, cache=None) -> WorldBankAdapter:
+        """Create adapter with pre-populated country lookup to avoid HTTP calls."""
+        adapter = WorldBankAdapter(cache=cache)
+        adapter._country_lookup = dict(self.SAMPLE_COUNTRY_LOOKUP)
+        return adapter
 
     @pytest.mark.asyncio
     async def test_query_success(self, httpx_mock) -> None:
@@ -98,7 +135,7 @@ class TestWorldBankAdapter:
             json=fixture_data,
         )
 
-        adapter = WorldBankAdapter()
+        adapter = self._adapter_with_country_lookup()
         result = await adapter.query(QueryParams(query="GDP United States"))
 
         assert result.status == ResultStatus.SUCCESS
@@ -111,7 +148,7 @@ class TestWorldBankAdapter:
     @pytest.mark.asyncio
     async def test_query_no_data_unparseable(self) -> None:
         """Unparseable query returns NO_DATA with helpful message."""
-        adapter = WorldBankAdapter()
+        adapter = self._adapter_with_country_lookup()
         result = await adapter.query(QueryParams(query="random gibberish"))
 
         assert result.status == ResultStatus.NO_DATA
@@ -126,7 +163,7 @@ class TestWorldBankAdapter:
             url=re.compile(r".*worldbank.*"),
         )
 
-        adapter = WorldBankAdapter()
+        adapter = self._adapter_with_country_lookup()
         with pytest.raises(AdapterTimeoutError):
             await adapter.query(QueryParams(query="GDP United States"))
 
@@ -138,7 +175,7 @@ class TestWorldBankAdapter:
             status_code=429,
         )
 
-        adapter = WorldBankAdapter()
+        adapter = self._adapter_with_country_lookup()
         result = await adapter.query(QueryParams(query="GDP United States"))
 
         assert result.status == ResultStatus.RATE_LIMITED
@@ -154,7 +191,7 @@ class TestWorldBankAdapter:
             ],
         )
 
-        adapter = WorldBankAdapter()
+        adapter = self._adapter_with_country_lookup()
         result = await adapter.query(QueryParams(query="GDP United States"))
 
         assert result.status == ResultStatus.NO_DATA
@@ -168,7 +205,7 @@ class TestWorldBankAdapter:
             status_code=200,
         )
 
-        adapter = WorldBankAdapter()
+        adapter = self._adapter_with_country_lookup()
         with pytest.raises(AdapterParseError) as exc_info:
             await adapter.query(QueryParams(query="GDP United States"))
 
@@ -199,7 +236,7 @@ class TestWorldBankAdapter:
 
         mock_cache.get = AsyncMock(return_value=mock_entry)
 
-        adapter = WorldBankAdapter(cache=mock_cache)
+        adapter = self._adapter_with_country_lookup(cache=mock_cache)
         result = await adapter.query(QueryParams(query="GDP United States"))
 
         # Verify cache was checked
@@ -225,7 +262,7 @@ class TestWorldBankAdapter:
         mock_cache.get = AsyncMock(return_value=None)
         mock_cache.set = AsyncMock()
 
-        adapter = WorldBankAdapter(cache=mock_cache)
+        adapter = self._adapter_with_country_lookup(cache=mock_cache)
         result = await adapter.query(QueryParams(query="GDP United States"))
 
         # Verify cache was checked
@@ -272,3 +309,74 @@ class TestWorldBankAdapter:
 
         await adapter.close()
         assert adapter._client is None
+
+    @pytest.mark.asyncio
+    async def test_ensure_country_lookup_fetches_countries(self, httpx_mock) -> None:
+        """Country lookup fetches countries from World Bank API."""
+        # Mock response with sample countries
+        country_response = [
+            {"page": 1, "pages": 1, "per_page": 400, "total": 3},
+            [
+                {"id": "VEN", "name": "Venezuela, RB", "iso2Code": "VE"},
+                {"id": "MEX", "name": "Mexico", "iso2Code": "MX"},
+                {"id": "ARG", "name": "Argentina", "iso2Code": "AR"},
+            ],
+        ]
+        httpx_mock.add_response(
+            url=re.compile(r".*country\?format=json.*"),
+            json=country_response,
+        )
+
+        adapter = WorldBankAdapter()
+        lookup = await adapter._ensure_country_lookup()
+
+        # Verify countries are in lookup
+        assert lookup["venezuela, rb"] == "VEN"
+        assert lookup["mexico"] == "MEX"
+        assert lookup["argentina"] == "ARG"
+        # ISO2 codes
+        assert lookup["ve"] == "VEN"
+        assert lookup["mx"] == "MEX"
+        # ISO3 codes
+        assert lookup["ven"] == "VEN"
+        assert lookup["mex"] == "MEX"
+
+    @pytest.mark.asyncio
+    async def test_ensure_country_lookup_caches_result(self, httpx_mock) -> None:
+        """Country lookup is cached after first fetch."""
+        country_response = [
+            {"page": 1, "pages": 1, "per_page": 400, "total": 1},
+            [{"id": "USA", "name": "United States", "iso2Code": "US"}],
+        ]
+        httpx_mock.add_response(
+            url=re.compile(r".*country\?format=json.*"),
+            json=country_response,
+        )
+
+        adapter = WorldBankAdapter()
+
+        # First call fetches
+        lookup1 = await adapter._ensure_country_lookup()
+        # Second call uses cache
+        lookup2 = await adapter._ensure_country_lookup()
+
+        assert lookup1 is lookup2
+        # Only one HTTP request should have been made
+        assert len(httpx_mock.get_requests()) == 1
+
+    @pytest.mark.asyncio
+    async def test_ensure_country_lookup_falls_back_on_error(self, httpx_mock) -> None:
+        """Country lookup falls back to aliases on API error."""
+        httpx_mock.add_exception(
+            httpx.ConnectError("Connection failed"),
+            url=re.compile(r".*country\?format=json.*"),
+        )
+
+        adapter = WorldBankAdapter()
+        lookup = await adapter._ensure_country_lookup()
+
+        # Should still have hardcoded aliases
+        assert lookup["usa"] == "USA"
+        assert lookup["uk"] == "GBR"
+        # But no dynamic countries
+        assert "venezuela" not in lookup

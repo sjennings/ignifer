@@ -33,26 +33,15 @@ INDICATOR_CODES: dict[str, str] = {
     "unemployment": "SL.UEM.TOTL.ZS",
 }
 
-# Country alias mapping (lowercase keys for case-insensitive matching)
+# Common aliases not in World Bank data (lowercase keys)
 COUNTRY_ALIASES: dict[str, str] = {
     "usa": "USA",
     "us": "USA",
-    "united states": "USA",
     "america": "USA",
-    "china": "CHN",
-    "prc": "CHN",
-    "germany": "DEU",
-    "japan": "JPN",
     "uk": "GBR",
-    "united kingdom": "GBR",
     "britain": "GBR",
-    "france": "FRA",
-    "india": "IND",
-    "brazil": "BRA",
-    "russia": "RUS",
+    "prc": "CHN",
     "eu": "EUU",
-    "european union": "EUU",
-    "sub-saharan africa": "SSF",
     "ssa": "SSF",
 }
 
@@ -79,6 +68,7 @@ class WorldBankAdapter:
         """
         self._client: httpx.AsyncClient | None = None
         self._cache = cache
+        self._country_lookup: dict[str, str] | None = None
 
     @property
     def source_name(self) -> str:
@@ -99,11 +89,62 @@ class WorldBankAdapter:
             )
         return self._client
 
-    def _parse_query(self, query: str) -> tuple[str | None, str | None]:
+    async def _ensure_country_lookup(self) -> dict[str, str]:
+        """Fetch and cache country lookup from World Bank API.
+
+        Returns:
+            Dictionary mapping country names/codes (lowercase) to ISO3 codes.
+        """
+        if self._country_lookup is not None:
+            return self._country_lookup
+
+        # Build lookup starting with hardcoded aliases
+        lookup: dict[str, str] = dict(COUNTRY_ALIASES)
+
+        try:
+            client = await self._get_client()
+            # Fetch all countries from World Bank
+            url = f"{self.BASE_URL}/country?format=json&per_page=400"
+            response = await client.get(url)
+            response.raise_for_status()
+
+            data = response.json()
+            if isinstance(data, list) and len(data) >= 2 and data[1]:
+                for country in data[1]:
+                    iso3 = country.get("id", "").upper()
+                    if not iso3:
+                        continue
+
+                    # Map country name -> ISO3
+                    name = country.get("name", "")
+                    if name:
+                        lookup[name.lower()] = iso3
+
+                    # Map ISO2 -> ISO3
+                    iso2 = country.get("iso2Code", "")
+                    if iso2:
+                        lookup[iso2.lower()] = iso3
+
+                    # Map ISO3 -> ISO3 (for direct code usage)
+                    lookup[iso3.lower()] = iso3
+
+                logger.info(f"Loaded {len(data[1])} countries from World Bank API")
+
+        except Exception as e:
+            logger.warning(f"Failed to fetch country list from World Bank: {e}")
+            # Fall back to aliases only - don't fail completely
+
+        self._country_lookup = lookup
+        return lookup
+
+    def _parse_query(
+        self, query: str, country_lookup: dict[str, str]
+    ) -> tuple[str | None, str | None]:
         """Parse query string to extract indicator and country.
 
         Args:
             query: Natural language query like "GDP United States"
+            country_lookup: Dictionary mapping country names/codes to ISO3 codes
 
         Returns:
             Tuple of (indicator_code, country_code) or (None, None) if not parseable
@@ -117,11 +158,11 @@ class WorldBankAdapter:
                 indicator_code = INDICATOR_CODES[indicator_name]
                 break
 
-        # Find country (check longer phrases first)
+        # Find country (check longer phrases first for multi-word names)
         country_code = None
-        for alias in sorted(COUNTRY_ALIASES.keys(), key=len, reverse=True):
-            if alias in query_lower:
-                country_code = COUNTRY_ALIASES[alias]
+        for name in sorted(country_lookup.keys(), key=len, reverse=True):
+            if name in query_lower:
+                country_code = country_lookup[name]
                 break
 
         return indicator_code, country_code
@@ -139,7 +180,9 @@ class WorldBankAdapter:
             AdapterTimeoutError: If request times out.
             AdapterParseError: If response cannot be parsed.
         """
-        indicator_code, country_code = self._parse_query(params.query)
+        # Ensure country lookup is loaded
+        country_lookup = await self._ensure_country_lookup()
+        indicator_code, country_code = self._parse_query(params.query, country_lookup)
 
         if not indicator_code or not country_code:
             return OSINTResult(
