@@ -94,31 +94,37 @@ class TestCacheManager:
     async def test_get_miss_returns_none(self) -> None:
         """Get on nonexistent key should return None."""
         manager = CacheManager()
-        result = await manager.get("nonexistent")
-        assert result is None
+        try:
+            result = await manager.get("nonexistent")
+            assert result is None
+        finally:
+            await manager.close()
 
     @pytest.mark.asyncio
     async def test_allow_stale_returns_expired_with_flag(self) -> None:
         """Get with allow_stale should return expired entries with flag."""
         manager = CacheManager()
-        # Set entry that's already expired
-        await manager._l1.set(
-            "test",
-            CacheEntry(
-                key="test",
-                data={"foo": "bar"},
-                created_at=datetime.now(timezone.utc) - timedelta(hours=2),
-                ttl_seconds=3600,
-                source="gdelt",
-            ),
-        )
+        try:
+            # Set entry that's already expired
+            await manager._l1.set(
+                "test",
+                CacheEntry(
+                    key="test",
+                    data={"foo": "bar"},
+                    created_at=datetime.now(timezone.utc) - timedelta(hours=2),
+                    ttl_seconds=3600,
+                    source="gdelt",
+                ),
+            )
 
-        # Without allow_stale, should return None
-        result = await manager.get("test", allow_stale=False)
-        assert result is None
+            # Without allow_stale, should return None
+            result = await manager.get("test", allow_stale=False)
+            assert result is None
 
-        # With allow_stale, should return data with is_stale=True
-        result = await manager.get("test", allow_stale=True)
-        assert result is not None
-        assert result.is_stale is True
-        assert result.data == {"foo": "bar"}
+            # With allow_stale, should return data with is_stale=True
+            result = await manager.get("test", allow_stale=True)
+            assert result is not None
+            assert result.is_stale is True
+            assert result.data == {"foo": "bar"}
+        finally:
+            await manager.close()

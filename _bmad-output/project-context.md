@@ -160,6 +160,7 @@ class OutputMode(Enum):
 - **Key format:** `{adapter}:{query_type}:{params_hash}`
 - **Include query type** in cache key to prevent collisions between different query types to same adapter
 - **Parameter order independence** via sorted JSON + SHA256 hash
+- **Always close CacheManager** - SQLite WAL connections will hang process on exit if not closed
 - **TTL defaults:**
   | Source | TTL |
   |--------|-----|
@@ -169,6 +170,42 @@ class OutputMode(Enum):
   | ACLED | 12 hours |
   | World Bank, OpenSanctions | 24 hours |
   | Wikidata | 7 days |
+
+### Resource Cleanup Rules
+
+- **MCP servers MUST register atexit handlers** to close adapters and cache connections
+- **Tests MUST close CacheManager** in `finally` blocks or fixtures
+- **Adapters have `close()` methods** - call them on shutdown
+- **SQLite WAL mode** keeps connections open; unclosed connections block process exit
+
+```python
+# Server cleanup pattern
+import atexit
+
+async def _cleanup_resources() -> None:
+    if _adapter: await _adapter.close()
+    if _cache: await _cache.close()
+
+def _atexit_cleanup() -> None:
+    try:
+        asyncio.run(_cleanup_resources())
+    except Exception:
+        pass  # Don't block shutdown
+
+atexit.register(_atexit_cleanup)
+```
+
+```python
+# Test cleanup pattern
+@pytest.mark.asyncio
+async def test_cache_operation() -> None:
+    manager = CacheManager()
+    try:
+        result = await manager.get("key")
+        assert result is None
+    finally:
+        await manager.close()
+```
 
 ### Logging Rules
 
@@ -251,6 +288,18 @@ from ignifer.server import ...  # NO! Layer violation
 # WRONG: Hardcoding reference data from APIs
 COUNTRY_CODES = {"usa": "USA", "germany": "DEU"}  # NO! Incomplete
 # Instead: Fetch dynamically from API and cache in memory
+
+# WRONG: Not closing CacheManager in tests
+async def test_something():
+    manager = CacheManager()
+    result = await manager.get("key")  # NO! Leaks SQLite connection
+    assert result is None
+# Use try/finally or fixture to ensure close()
+
+# WRONG: No atexit cleanup in server
+def main():
+    mcp.run()  # NO! Resources never cleaned up
+# Register atexit handler to close adapters and cache
 ```
 
 ### External API Reference Data
@@ -335,4 +384,4 @@ When implementing features, reference PRD FR numbers in code comments for comple
 
 ---
 
-_Last Updated: 2026-01-08_
+_Last Updated: 2026-01-09_

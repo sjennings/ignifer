@@ -41,6 +41,12 @@ KEY_PROPERTIES: dict[str, str] = {
     "P571": "inception",
     "P856": "website",
     "P625": "coordinates",
+    # Country context properties (for economic_context)
+    "P6": "head_of_government",
+    "P35": "head_of_state",
+    "P38": "currency",
+    "P1304": "central_bank",
+    "P463": "member_of",
 }
 
 

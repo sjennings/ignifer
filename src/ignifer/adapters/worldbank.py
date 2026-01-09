@@ -24,6 +24,7 @@ logger = logging.getLogger(__name__)
 
 # Indicator code mapping
 INDICATOR_CODES: dict[str, str] = {
+    # Core indicators
     "gdp": "NY.GDP.MKTP.CD",
     "gdp per capita": "NY.GDP.PCAP.CD",
     "inflation": "FP.CPI.TOTL.ZG",
@@ -31,6 +32,19 @@ INDICATOR_CODES: dict[str, str] = {
     "trade": "NE.RSB.GNFS.CD",
     "trade balance": "NE.RSB.GNFS.CD",
     "unemployment": "SL.UEM.TOTL.ZS",
+    # E1 Vulnerability indicators
+    "external debt": "DT.DOD.DECT.GN.ZS",
+    "current account": "BN.CAB.XOKA.GD.ZS",
+    "total reserves": "FI.RES.TOTL.MO",
+    "short-term debt": "DT.DOD.DSTC.IR.ZS",
+    # E2 Trade indicators
+    "exports": "NE.EXP.GNFS.ZS",
+    "imports": "NE.IMP.GNFS.ZS",
+    "trade openness": "NE.TRD.GNFS.ZS",
+    # E4 Financial indicators
+    "fdi inflows": "BX.KLT.DINV.WD.GD.ZS",
+    "domestic credit": "FS.AST.DOMS.GD.ZS",
+    "broad money": "FM.LBL.BMNY.GD.ZS",
 }
 
 # Common aliases not in World Bank data (lowercase keys)

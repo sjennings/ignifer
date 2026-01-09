@@ -29,22 +29,27 @@ def worldbank_response():
 @pytest.fixture
 def mock_osint_result():
     """Create a mock OSINTResult for testing."""
-    def _make_result(indicator: str, value: float | None = None, year: str = "2023"):
+    def _make_result(
+        indicator: str,
+        value: float | None = None,
+        year: str = "2023",
+        country: str = "United States"
+    ):
         retrieved_at = datetime.now(timezone.utc)
         if value is None:
             return OSINTResult(
                 status=ResultStatus.NO_DATA,
-                query=f"{indicator} United States",
+                query=f"{indicator} {country}",
                 results=[],
                 sources=[],
                 retrieved_at=retrieved_at,
             )
         return OSINTResult(
             status=ResultStatus.SUCCESS,
-            query=f"{indicator} United States",
+            query=f"{indicator} {country}",
             results=[{
                 "indicator": indicator,
-                "country": "United States",
+                "country": country,
                 "year": year,
                 "value": value,
             }],
@@ -54,405 +59,519 @@ def mock_osint_result():
     return _make_result
 
 
+def create_no_data_result():
+    """Create a NO_DATA result."""
+    return OSINTResult(
+        status=ResultStatus.NO_DATA,
+        query="test",
+        results=[],
+        sources=[],
+        retrieved_at=datetime.now(timezone.utc),
+    )
+
+
+# Number of indicators: 3 core + 4 E1 + 4 E2 + 4 E4 = 15
+INDICATOR_COUNT = 15
+
+
+@pytest.fixture
+def mock_all_adapters():
+    """Context manager that mocks WorldBank, GDELT, and Wikidata adapters."""
+    with patch("ignifer.server._get_worldbank") as mock_wb, \
+         patch("ignifer.server._get_adapter") as mock_gdelt, \
+         patch("ignifer.server._get_wikidata") as mock_wiki:
+
+        # GDELT mock - return empty results (silent degradation)
+        gdelt_adapter = AsyncMock()
+        gdelt_adapter.query.return_value = OSINTResult(
+            status=ResultStatus.NO_DATA,
+            query="test",
+            results=[],
+            sources=[],
+            retrieved_at=datetime.now(timezone.utc),
+        )
+        mock_gdelt.return_value = gdelt_adapter
+
+        # Wikidata mock - return empty results (silent degradation)
+        wiki_adapter = AsyncMock()
+        wiki_adapter.query.return_value = OSINTResult(
+            status=ResultStatus.NO_DATA,
+            query="test",
+            results=[],
+            sources=[],
+            retrieved_at=datetime.now(timezone.utc),
+        )
+        wiki_adapter.lookup_by_qid.return_value = OSINTResult(
+            status=ResultStatus.NO_DATA,
+            query="test",
+            results=[],
+            sources=[],
+            retrieved_at=datetime.now(timezone.utc),
+        )
+        mock_wiki.return_value = wiki_adapter
+
+        # WorldBank mock - will be configured per test
+        wb_adapter = AsyncMock()
+        mock_wb.return_value = wb_adapter
+
+        yield {
+            "worldbank": wb_adapter,
+            "gdelt": gdelt_adapter,
+            "wikidata": wiki_adapter,
+        }
+
+
 @pytest.mark.asyncio
-async def test_economic_context_success(mock_osint_result):
+async def test_economic_context_success(mock_osint_result, mock_all_adapters):
     """Test successful economic context retrieval."""
-    with patch("ignifer.server._get_worldbank") as mock_get_wb:
-        mock_adapter = AsyncMock()
+    wb = mock_all_adapters["worldbank"]
 
-        # Mock responses for each indicator
-        mock_adapter.query.side_effect = [
-            mock_osint_result("GDP (current US$)", 25462700000000),  # $25.46 trillion
-            mock_osint_result("GDP per capita (current US$)", 76330),
-            mock_osint_result("Inflation, consumer prices (annual %)", 4.1),
-            mock_osint_result("Unemployment, total (% of total labor force)", 3.6),
-            # Trade balance: -$948.1B
-            mock_osint_result(
-                "External balance on goods and services (current US$)", -948100000000
-            ),
-            mock_osint_result("Population, total", 334900000),  # 334.9 million
-        ]
+    # Mock responses for all 15 indicators
+    wb.query.side_effect = [
+        # Core indicators (3)
+        mock_osint_result("GDP (current US$)", 25462700000000),  # $25.46 trillion
+        mock_osint_result("GDP per capita (current US$)", 76330),
+        mock_osint_result("Population, total", 334900000),  # 334.9 million
+        # E1 Vulnerability (4)
+        mock_osint_result("External debt", 50.0),
+        mock_osint_result("Current account", -3.5),
+        mock_osint_result("Total reserves", 2.1),
+        mock_osint_result("Short-term debt", 25.0),
+        # E2 Trade (4)
+        mock_osint_result("Exports", 11.5),
+        mock_osint_result("Imports", 14.2),
+        mock_osint_result("Trade openness", 25.7),
+        mock_osint_result("Trade balance", -948100000000),  # -$948.1B
+        # E4 Financial (4)
+        mock_osint_result("Inflation", 4.1),
+        mock_osint_result("Unemployment", 3.6),
+        mock_osint_result("FDI inflows", 1.5),
+        mock_osint_result("Domestic credit", 220.0),
+    ]
 
-        mock_get_wb.return_value = mock_adapter
+    result = await call_economic_context("United States")
 
-        result = await call_economic_context("United States")
+    # Verify call count
+    assert wb.query.call_count == INDICATOR_COUNT
 
-        # Verify call count
-        assert mock_adapter.query.call_count == 6
+    # Check output format
+    assert "ECONOMIC CONTEXT" in result
+    assert "COUNTRY: United States" in result
+    assert "KEY INDICATORS (2023):" in result
+    assert "$25.46 trillion" in result
+    assert "$76,330" in result
+    assert "334.9 million" in result
 
-        # Check output format
-        assert "ECONOMIC CONTEXT" in result
-        assert "COUNTRY: United States" in result
-        assert "KEY INDICATORS (2023):" in result
-        assert "$25.46 trillion" in result
-        assert "$76,330" in result
-        assert "4.1%" in result
-        assert "3.6%" in result
-        assert "-$948.1 billion" in result
-        assert "334.9 million" in result
-        assert "Source: World Bank Open Data" in result
-        assert "Retrieved:" in result
+    # E1 section
+    assert "VULNERABILITY ASSESSMENT (E1):" in result
+    assert "50.0% of GNI" in result
+    assert "-3.5% of GDP" in result
+
+    # E2 section
+    assert "TRADE PROFILE (E2):" in result
+    assert "11.5% of GDP" in result  # Exports
+    assert "-$948.1 billion" in result
+
+    # E4 section
+    assert "FINANCIAL INDICATORS (E4):" in result
+    assert "4.1%" in result  # Inflation
+    assert "3.6%" in result  # Unemployment
+
+    assert "Sources: World Bank Open Data" in result
+    assert "Retrieved:" in result
 
 
 @pytest.mark.asyncio
-async def test_economic_context_partial_data(mock_osint_result):
+async def test_economic_context_partial_data(mock_osint_result, mock_all_adapters):
     """Test economic context with partial data availability."""
-    with patch("ignifer.server._get_worldbank") as mock_get_wb:
-        mock_adapter = AsyncMock()
+    wb = mock_all_adapters["worldbank"]
 
-        # Some indicators return data, some don't
-        mock_adapter.query.side_effect = [
-            mock_osint_result("GDP (current US$)", 25462700000000),
-            mock_osint_result("GDP per capita (current US$)", None),  # No data
-            mock_osint_result("Inflation, consumer prices (annual %)", 4.1),
-            mock_osint_result("Unemployment, total (% of total labor force)", None),
-            # Trade balance
-            mock_osint_result(
-                "External balance on goods and services (current US$)", -948100000000
-            ),
-            mock_osint_result("Population, total", 334900000),
-        ]
+    # Some indicators return data, some don't
+    wb.query.side_effect = [
+        # Core indicators
+        mock_osint_result("GDP (current US$)", 25462700000000),
+        mock_osint_result("GDP per capita (current US$)", None),  # No data
+        mock_osint_result("Population, total", 334900000),
+        # E1 - all no data
+        create_no_data_result(),
+        create_no_data_result(),
+        create_no_data_result(),
+        create_no_data_result(),
+        # E2 - partial
+        mock_osint_result("Exports", 11.5),
+        create_no_data_result(),
+        create_no_data_result(),
+        mock_osint_result("Trade balance", -948100000000),
+        # E4
+        mock_osint_result("Inflation", 4.1),
+        create_no_data_result(),
+        create_no_data_result(),
+        create_no_data_result(),
+    ]
 
-        mock_get_wb.return_value = mock_adapter
+    result = await call_economic_context("United States")
 
-        result = await call_economic_context("United States")
+    # Should still return formatted output
+    assert "ECONOMIC CONTEXT" in result
+    assert "COUNTRY: United States" in result
+    assert "$25.46 trillion" in result  # GDP present
+    assert "$76,330" not in result  # GDP per capita missing
 
-        # Should still return formatted output
-        assert "ECONOMIC CONTEXT" in result
-        assert "COUNTRY: United States" in result
-        assert "$25.46 trillion" in result  # GDP present
-        assert "$76,330" not in result  # GDP per capita missing
-        assert "4.1%" in result  # Inflation present
-        # Unemployment missing - we don't check for specific % since we don't have it
+    # E1 section should be absent since all NO_DATA
+    assert "VULNERABILITY ASSESSMENT (E1):" not in result
+
+    # E2 section should be present with partial data
+    assert "TRADE PROFILE (E2):" in result
+    assert "11.5% of GDP" in result
+
+    # E4 section present with inflation
+    assert "FINANCIAL INDICATORS (E4):" in result
+    assert "4.1%" in result
 
 
 @pytest.mark.asyncio
-async def test_economic_context_country_not_found():
+async def test_economic_context_country_not_found(mock_all_adapters):
     """Test economic context with invalid country."""
-    with patch("ignifer.server._get_worldbank") as mock_get_wb:
-        mock_adapter = AsyncMock()
+    wb = mock_all_adapters["worldbank"]
 
-        # All queries return NO_DATA
-        no_data_result = OSINTResult(
-            status=ResultStatus.NO_DATA,
-            query="gdp InvalidCountry",
-            results=[],
-            sources=[],
-            retrieved_at=datetime.now(timezone.utc),
-        )
-        mock_adapter.query.return_value = no_data_result
+    # All queries return NO_DATA
+    wb.query.return_value = create_no_data_result()
 
-        mock_get_wb.return_value = mock_adapter
+    result = await call_economic_context("InvalidCountry")
 
-        result = await call_economic_context("InvalidCountry")
-
-        assert "Country Not Found" in result
-        assert "InvalidCountry" in result
-        assert "Check the spelling" in result
-        assert "ISO country code" in result
+    assert "Country Not Found" in result
+    assert "InvalidCountry" in result
+    assert "Check the spelling" in result
+    assert "ISO country code" in result
 
 
 @pytest.mark.asyncio
-async def test_economic_context_timeout():
+async def test_economic_context_timeout(mock_all_adapters):
     """Test economic context with timeout error."""
-    with patch("ignifer.server._get_worldbank") as mock_get_wb:
-        mock_adapter = AsyncMock()
-        mock_adapter.query.side_effect = AdapterTimeoutError("worldbank", 15.0)
+    wb = mock_all_adapters["worldbank"]
+    wb.query.side_effect = AdapterTimeoutError("worldbank", 15.0)
 
-        mock_get_wb.return_value = mock_adapter
+    result = await call_economic_context("Germany")
 
-        result = await call_economic_context("Germany")
-
-        assert "Request Timed Out" in result
-        assert "Germany" in result
-        assert "Try again in a moment" in result
-        assert "network connection" in result
+    assert "Request Timed Out" in result
+    assert "Germany" in result
+    assert "Try again in a moment" in result
+    assert "network connection" in result
 
 
 @pytest.mark.asyncio
-async def test_economic_context_rate_limited():
+async def test_economic_context_rate_limited(mock_all_adapters):
     """Test economic context with rate limit error (via AdapterError)."""
-    with patch("ignifer.server._get_worldbank") as mock_get_wb:
-        mock_adapter = AsyncMock()
+    wb = mock_all_adapters["worldbank"]
+    error = AdapterError("worldbank", "Rate limit exceeded")
+    wb.query.side_effect = error
 
-        # Create an AdapterError with rate limit message
-        error = AdapterError("worldbank", "Rate limit exceeded")
-        mock_adapter.query.side_effect = error
+    result = await call_economic_context("Japan")
 
-        mock_get_wb.return_value = mock_adapter
-
-        result = await call_economic_context("Japan")
-
-        assert "Service Temporarily Unavailable" in result
-        assert "rate limiting" in result
-        assert "Wait a few minutes" in result
+    assert "Service Temporarily Unavailable" in result
+    assert "rate limiting" in result
+    assert "Wait a few minutes" in result
 
 
 @pytest.mark.asyncio
-async def test_economic_context_rate_limited_status():
+async def test_economic_context_rate_limited_status(mock_all_adapters):
     """Test economic context with RATE_LIMITED result status."""
-    with patch("ignifer.server._get_worldbank") as mock_get_wb:
-        mock_adapter = AsyncMock()
+    wb = mock_all_adapters["worldbank"]
 
-        # Return RATE_LIMITED status from adapter
-        rate_limited_result = OSINTResult(
-            status=ResultStatus.RATE_LIMITED,
-            query="gdp China",
-            results=[],
-            sources=[],
-            retrieved_at=datetime.now(timezone.utc),
-        )
-        mock_adapter.query.return_value = rate_limited_result
+    # Return RATE_LIMITED status from adapter
+    rate_limited_result = OSINTResult(
+        status=ResultStatus.RATE_LIMITED,
+        query="gdp China",
+        results=[],
+        sources=[],
+        retrieved_at=datetime.now(timezone.utc),
+    )
+    wb.query.return_value = rate_limited_result
 
-        mock_get_wb.return_value = mock_adapter
+    result = await call_economic_context("China")
 
-        result = await call_economic_context("China")
-
-        assert "Service Temporarily Unavailable" in result
-        assert "rate limiting" in result
-        assert "Try again in a few minutes" in result
+    assert "Service Temporarily Unavailable" in result
+    assert "rate limiting" in result
+    assert "Try again in a few minutes" in result
 
 
 @pytest.mark.asyncio
-async def test_economic_context_adapter_error():
+async def test_economic_context_adapter_error(mock_all_adapters):
     """Test economic context with general adapter error."""
-    with patch("ignifer.server._get_worldbank") as mock_get_wb:
-        mock_adapter = AsyncMock()
+    wb = mock_all_adapters["worldbank"]
+    error = AdapterError("worldbank", "Unknown error occurred")
+    wb.query.side_effect = error
 
-        error = AdapterError("worldbank", "Unknown error occurred")
-        mock_adapter.query.side_effect = error
+    result = await call_economic_context("France")
 
-        mock_get_wb.return_value = mock_adapter
-
-        result = await call_economic_context("France")
-
-        assert "Unable to Retrieve Data" in result
-        assert "France" in result
-        assert "Unknown error occurred" in result
+    assert "Unable to Retrieve Data" in result
+    assert "France" in result
+    assert "Unknown error occurred" in result
 
 
 @pytest.mark.asyncio
-async def test_economic_context_unexpected_error():
+async def test_economic_context_unexpected_error(mock_all_adapters):
     """Test economic context with unexpected exception."""
-    with patch("ignifer.server._get_worldbank") as mock_get_wb:
-        mock_adapter = AsyncMock()
-        mock_adapter.query.side_effect = ValueError("Unexpected error")
+    wb = mock_all_adapters["worldbank"]
+    wb.query.side_effect = ValueError("Unexpected error")
 
-        mock_get_wb.return_value = mock_adapter
+    result = await call_economic_context("India")
 
-        result = await call_economic_context("India")
-
-        assert "Error" in result
-        assert "unexpected error" in result
-        assert "India" in result
+    assert "Error" in result
+    assert "unexpected error" in result
+    assert "India" in result
 
 
 @pytest.mark.asyncio
-async def test_economic_context_different_years(mock_osint_result):
+async def test_economic_context_different_years(mock_all_adapters):
     """Test economic context when indicators have different years."""
-    with patch("ignifer.server._get_worldbank") as mock_get_wb:
-        mock_adapter = AsyncMock()
+    wb = mock_all_adapters["worldbank"]
 
-        # Different years for different indicators
-        def make_year_result(indicator: str, value: float, year: str):
-            return OSINTResult(
-                status=ResultStatus.SUCCESS,
-                query=f"{indicator} Brazil",
-                results=[{
-                    "indicator": indicator,
-                    "country": "Brazil",
-                    "year": year,
-                    "value": value,
-                }],
-                sources=[],
-                retrieved_at=datetime.now(timezone.utc),
-            )
+    def make_year_result(indicator: str, value: float, year: str):
+        return OSINTResult(
+            status=ResultStatus.SUCCESS,
+            query=f"{indicator} Brazil",
+            results=[{
+                "indicator": indicator,
+                "country": "Brazil",
+                "year": year,
+                "value": value,
+            }],
+            sources=[],
+            retrieved_at=datetime.now(timezone.utc),
+        )
 
-        mock_adapter.query.side_effect = [
-            make_year_result("GDP (current US$)", 2000000000000, "2023"),
-            make_year_result("GDP per capita (current US$)", 10000, "2023"),
-            make_year_result("Inflation, consumer prices (annual %)", 5.0, "2022"),
-            make_year_result(
-                "Unemployment, total (% of total labor force)", 8.0, "2021"
-            ),
-            make_year_result(
-                "External balance on goods and services (current US$)",
-                50000000000, "2023"
-            ),
-            make_year_result("Population, total", 215000000, "2023"),
-        ]
+    # Different years for different indicators - first one determines displayed year
+    wb.query.side_effect = [
+        make_year_result("GDP (current US$)", 2000000000000, "2023"),
+        make_year_result("GDP per capita", 10000, "2023"),
+        make_year_result("Population", 215000000, "2023"),
+    ] + [create_no_data_result()] * (INDICATOR_COUNT - 3)
 
-        mock_get_wb.return_value = mock_adapter
+    result = await call_economic_context("Brazil")
 
-        result = await call_economic_context("Brazil")
-
-        # Should use the year from the first indicator
-        assert "KEY INDICATORS (2023):" in result
-        assert "Brazil" in result
+    # Should use the year from the first indicator
+    assert "KEY INDICATORS (2023):" in result
+    assert "Brazil" in result
 
 
 @pytest.mark.asyncio
-async def test_economic_context_positive_trade_balance(mock_osint_result):
+async def test_economic_context_positive_trade_balance(mock_osint_result, mock_all_adapters):
     """Test formatting of positive trade balance."""
-    with patch("ignifer.server._get_worldbank") as mock_get_wb:
-        mock_adapter = AsyncMock()
+    wb = mock_all_adapters["worldbank"]
 
-        # Mock with positive trade balance
-        mock_adapter.query.side_effect = [
-            mock_osint_result("GDP (current US$)", 1500000000000),
-            mock_osint_result("GDP per capita (current US$)", 50000),
-            mock_osint_result("Inflation, consumer prices (annual %)", 2.0),
-            mock_osint_result("Unemployment, total (% of total labor force)", 5.0),
-            # Trade balance: +$100B
-            mock_osint_result(
-                "External balance on goods and services (current US$)", 100000000000
-            ),
-            mock_osint_result("Population, total", 50000000),
-        ]
+    # Create results with positive trade balance
+    wb.query.side_effect = [
+        mock_osint_result("GDP", 1500000000000),
+        mock_osint_result("GDP per capita", 50000),
+        mock_osint_result("Population", 50000000),
+    ] + [create_no_data_result()] * 4 + [  # E1 no data
+        create_no_data_result(),  # Exports
+        create_no_data_result(),  # Imports
+        create_no_data_result(),  # Trade openness
+        mock_osint_result("Trade balance", 100000000000),  # +$100B
+    ] + [create_no_data_result()] * 4  # E4 no data
 
-        mock_get_wb.return_value = mock_adapter
+    result = await call_economic_context("TestCountry")
 
-        result = await call_economic_context("TestCountry")
-
-        # Check for positive sign
-        assert "+$100.0 billion" in result
+    # Check for positive sign
+    assert "+$100.0 billion" in result
 
 
 @pytest.mark.asyncio
-async def test_economic_context_country_alias():
+async def test_economic_context_country_alias(mock_all_adapters):
     """Test that country aliases work correctly."""
-    with patch("ignifer.server._get_worldbank") as mock_get_wb:
-        mock_adapter = AsyncMock()
+    wb = mock_all_adapters["worldbank"]
 
-        # Mock successful response
-        success_result = OSINTResult(
-            status=ResultStatus.SUCCESS,
-            query="gdp USA",
-            results=[{
-                "indicator": "GDP (current US$)",
-                "country": "United States",
-                "year": "2023",
-                "value": 25000000000000,
-            }],
-            sources=[],
-            retrieved_at=datetime.now(timezone.utc),
-        )
+    # Mock successful response for GDP, NO_DATA for others
+    success_result = OSINTResult(
+        status=ResultStatus.SUCCESS,
+        query="gdp USA",
+        results=[{
+            "indicator": "GDP (current US$)",
+            "country": "United States",
+            "year": "2023",
+            "value": 25000000000000,
+        }],
+        sources=[],
+        retrieved_at=datetime.now(timezone.utc),
+    )
 
-        # Return success for GDP, NO_DATA for others to keep test simple
-        no_data = OSINTResult(
-            status=ResultStatus.NO_DATA,
-            query="test",
-            results=[],
-            sources=[],
-            retrieved_at=datetime.now(timezone.utc),
-        )
+    wb.query.side_effect = [success_result] + [create_no_data_result()] * (INDICATOR_COUNT - 1)
 
-        mock_adapter.query.side_effect = [
-            success_result,
-            no_data,
-            no_data,
-            no_data,
-            no_data,
-            no_data,
-        ]
+    # Use "USA" alias instead of "United States"
+    result = await call_economic_context("USA")
 
-        mock_get_wb.return_value = mock_adapter
-
-        # Use "USA" alias instead of "United States"
-        result = await call_economic_context("USA")
-
-        # Should resolve to United States
-        assert "United States" in result
-        assert "ECONOMIC CONTEXT" in result
+    # Should resolve to United States
+    assert "United States" in result
+    assert "ECONOMIC CONTEXT" in result
 
 
 @pytest.mark.asyncio
-async def test_economic_context_regional_aggregate_eu():
-    """Test economic context for European Union regional aggregate (AC5)."""
-    with patch("ignifer.server._get_worldbank") as mock_get_wb:
-        mock_adapter = AsyncMock()
+async def test_economic_context_regional_aggregate_eu(mock_all_adapters):
+    """Test economic context for European Union regional aggregate."""
+    wb = mock_all_adapters["worldbank"]
 
-        # Mock successful response for EU
-        success_result = OSINTResult(
-            status=ResultStatus.SUCCESS,
-            query="gdp European Union",
-            results=[{
-                "indicator": "GDP (current US$)",
-                "country": "European Union",
-                "year": "2023",
-                "value": 16640000000000,  # ~$16.64 trillion
-            }],
-            sources=[],
-            retrieved_at=datetime.now(timezone.utc),
-        )
+    success_result = OSINTResult(
+        status=ResultStatus.SUCCESS,
+        query="gdp European Union",
+        results=[{
+            "indicator": "GDP (current US$)",
+            "country": "European Union",
+            "year": "2023",
+            "value": 16640000000000,  # ~$16.64 trillion
+        }],
+        sources=[],
+        retrieved_at=datetime.now(timezone.utc),
+    )
 
-        no_data = OSINTResult(
-            status=ResultStatus.NO_DATA,
-            query="test",
-            results=[],
-            sources=[],
-            retrieved_at=datetime.now(timezone.utc),
-        )
+    wb.query.side_effect = [success_result] + [create_no_data_result()] * (INDICATOR_COUNT - 1)
 
-        mock_adapter.query.side_effect = [
-            success_result,
-            no_data,
-            no_data,
-            no_data,
-            no_data,
-            no_data,
-        ]
+    result = await call_economic_context("European Union")
 
-        mock_get_wb.return_value = mock_adapter
-
-        result = await call_economic_context("European Union")
-
-        assert "ECONOMIC CONTEXT" in result
-        assert "European Union" in result
-        assert "$16.64 trillion" in result
+    assert "ECONOMIC CONTEXT" in result
+    assert "European Union" in result
+    assert "$16.64 trillion" in result
 
 
 @pytest.mark.asyncio
-async def test_economic_context_regional_aggregate_sub_saharan_africa():
-    """Test economic context for Sub-Saharan Africa regional aggregate (AC5)."""
-    with patch("ignifer.server._get_worldbank") as mock_get_wb:
-        mock_adapter = AsyncMock()
+async def test_economic_context_regional_aggregate_sub_saharan_africa(mock_all_adapters):
+    """Test economic context for Sub-Saharan Africa regional aggregate."""
+    wb = mock_all_adapters["worldbank"]
 
-        # Mock successful response for Sub-Saharan Africa
-        success_result = OSINTResult(
-            status=ResultStatus.SUCCESS,
-            query="gdp Sub-Saharan Africa",
-            results=[{
-                "indicator": "GDP (current US$)",
-                "country": "Sub-Saharan Africa",
-                "year": "2022",
-                "value": 1860000000000,  # ~$1.86 trillion
-            }],
-            sources=[],
-            retrieved_at=datetime.now(timezone.utc),
-        )
+    success_result = OSINTResult(
+        status=ResultStatus.SUCCESS,
+        query="gdp Sub-Saharan Africa",
+        results=[{
+            "indicator": "GDP (current US$)",
+            "country": "Sub-Saharan Africa",
+            "year": "2022",
+            "value": 1860000000000,  # ~$1.86 trillion
+        }],
+        sources=[],
+        retrieved_at=datetime.now(timezone.utc),
+    )
 
-        no_data = OSINTResult(
-            status=ResultStatus.NO_DATA,
-            query="test",
-            results=[],
-            sources=[],
-            retrieved_at=datetime.now(timezone.utc),
-        )
+    wb.query.side_effect = [success_result] + [create_no_data_result()] * (INDICATOR_COUNT - 1)
 
-        mock_adapter.query.side_effect = [
-            success_result,
-            no_data,
-            no_data,
-            no_data,
-            no_data,
-            no_data,
-        ]
+    result = await call_economic_context("Sub-Saharan Africa")
 
-        mock_get_wb.return_value = mock_adapter
+    assert "ECONOMIC CONTEXT" in result
+    assert "Sub-Saharan Africa" in result
+    assert "$1.86 trillion" in result
 
-        result = await call_economic_context("Sub-Saharan Africa")
 
-        assert "ECONOMIC CONTEXT" in result
-        assert "Sub-Saharan Africa" in result
-        assert "$1.86 trillion" in result
+@pytest.mark.asyncio
+async def test_economic_context_with_wikidata_context(mock_osint_result, mock_all_adapters):
+    """Test economic context includes Wikidata government context when available."""
+    wb = mock_all_adapters["worldbank"]
+    wiki = mock_all_adapters["wikidata"]
+
+    # Mock WorldBank responses
+    wb.query.side_effect = [
+        mock_osint_result("GDP", 4000000000000, country="Germany"),
+    ] + [create_no_data_result()] * (INDICATOR_COUNT - 1)
+
+    # Mock Wikidata search response (returns Q-ID)
+    wiki.query.return_value = OSINTResult(
+        status=ResultStatus.SUCCESS,
+        query="Germany",
+        results=[{
+            "qid": "Q183",
+            "label": "Germany",
+            "description": "country in Central Europe",
+        }],
+        sources=[],
+        retrieved_at=datetime.now(timezone.utc),
+    )
+
+    # Mock Wikidata lookup_by_qid response (returns full properties)
+    wiki.lookup_by_qid.return_value = OSINTResult(
+        status=ResultStatus.SUCCESS,
+        query="Q183",
+        results=[{
+            "qid": "Q183",
+            "label": "Germany",
+            "description": "country in Central Europe",
+            "head_of_government": "Olaf Scholz",
+            "currency": "Euro",
+        }],
+        sources=[],
+        retrieved_at=datetime.now(timezone.utc),
+    )
+
+    result = await call_economic_context("Germany")
+
+    assert "ECONOMIC CONTEXT" in result
+    assert "Germany" in result
+    assert "Olaf Scholz" in result
+    assert "Currency: Euro" in result
+    assert "Wikidata" in result  # Source attribution
+
+
+@pytest.mark.asyncio
+async def test_economic_context_with_gdelt_events(mock_osint_result, mock_all_adapters):
+    """Test economic context includes GDELT events when available."""
+    wb = mock_all_adapters["worldbank"]
+    gdelt = mock_all_adapters["gdelt"]
+
+    # Mock WorldBank responses
+    wb.query.side_effect = [
+        mock_osint_result("GDP", 4000000000000, country="Germany"),
+    ] + [create_no_data_result()] * (INDICATOR_COUNT - 1)
+
+    # Mock GDELT response with economic events
+    gdelt.query.return_value = OSINTResult(
+        status=ResultStatus.SUCCESS,
+        query="Germany economy",
+        results=[
+            {"title": "Germany trade deal announced", "seendate": "2026-01-08T12:00:00Z"},
+            {"title": "ECB holds interest rates", "seendate": "2026-01-07T10:00:00Z"},
+        ],
+        sources=[],
+        retrieved_at=datetime.now(timezone.utc),
+    )
+
+    result = await call_economic_context("Germany")
+
+    assert "ECONOMIC CONTEXT" in result
+    assert "RECENT ECONOMIC EVENTS:" in result
+    assert "Germany trade deal announced" in result
+    assert "ECB holds interest rates" in result
+    assert "GDELT" in result  # Source attribution
+
+
+@pytest.mark.asyncio
+async def test_economic_context_silent_degradation(mock_osint_result, mock_all_adapters):
+    """Test that GDELT/Wikidata failures degrade silently."""
+    wb = mock_all_adapters["worldbank"]
+    gdelt = mock_all_adapters["gdelt"]
+    wiki = mock_all_adapters["wikidata"]
+
+    # Mock WorldBank responses - success
+    wb.query.side_effect = [
+        mock_osint_result("GDP", 4000000000000, country="Germany"),
+    ] + [create_no_data_result()] * (INDICATOR_COUNT - 1)
+
+    # GDELT throws exception
+    gdelt.query.side_effect = Exception("GDELT is down")
+
+    # Wikidata throws exception
+    wiki.query.side_effect = Exception("Wikidata is down")
+
+    result = await call_economic_context("Germany")
+
+    # Should still return valid output with World Bank data
+    assert "ECONOMIC CONTEXT" in result
+    assert "Germany" in result
+    assert "$4.00 trillion" in result
+
+    # Should NOT contain error messages
+    assert "Error" not in result
+    assert "GDELT is down" not in result
+    assert "Wikidata is down" not in result
+
+    # Should only show World Bank as source
+    assert "Sources: World Bank Open Data" in result
+    assert "GDELT" not in result
+    assert "Wikidata" not in result

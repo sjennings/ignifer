@@ -822,6 +822,57 @@ So that **I can quickly understand who or what I'm researching**.
 
 ---
 
+### Story 3.4: Economic Context Wikidata Integration
+
+As a **geopolitical analyst**,
+I want **economic context to include government and institutional information**,
+So that **I can understand the political context affecting economic conditions**.
+
+**Acceptance Criteria:**
+
+**Given** the economic_context tool from Epic 2
+**When** I enhance it with Wikidata integration
+**Then** it:
+- Queries Wikidata for country institutional context (head of government, currency)
+- Displays government leadership information when available
+- Displays currency information when available
+- Silently omits government context section if Wikidata lookup fails
+
+**Given** the economic_context tool
+**When** I add GDELT integration
+**Then** it:
+- Queries GDELT for recent economic events mentioning the country
+- Displays up to 5 recent economic events (sanctions, trade, inflation news)
+- Silently omits events section if GDELT lookup fails
+
+**Given** the economic_context output format
+**When** I restructure with E-series categories
+**Then** output includes:
+- KEY INDICATORS section with core economic data
+- VULNERABILITY ASSESSMENT (E1) section with debt and reserves metrics
+- TRADE PROFILE (E2) section with export/import metrics
+- FINANCIAL INDICATORS (E4) section with inflation, unemployment, FDI
+- RECENT ECONOMIC EVENTS section with GDELT news
+- Sources attribution listing all contributing data sources
+
+**Given** Wikidata lookup fails
+**When** economic_context completes
+**Then** output still displays all World Bank indicators successfully
+**And** government context line is simply omitted (no error message)
+**And** "Wikidata" is not listed in sources
+
+**Given** GDELT lookup fails
+**When** economic_context completes
+**Then** output still displays all World Bank indicators successfully
+**And** RECENT ECONOMIC EVENTS section is simply omitted (no error message)
+**And** "GDELT" is not listed in sources
+
+**Given** all sources succeed
+**When** economic_context completes
+**Then** sources line shows: "Sources: World Bank Open Data, Wikidata, GDELT"
+
+---
+
 ## Epic 4: Aviation Tracking
 
 **Goal:** Users can track aircraft by callsign/tail number and get historical position data with timestamps. Introduces API key configuration for OpenSky.

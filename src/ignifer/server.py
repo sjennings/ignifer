@@ -1,6 +1,7 @@
 """FastMCP server for Ignifer OSINT tools."""
 
 import asyncio
+import atexit
 import logging
 from datetime import datetime, timezone
 from typing import Any
@@ -9,7 +10,13 @@ import httpx
 import trafilatura
 from fastmcp import FastMCP
 
-from ignifer.adapters import AdapterError, AdapterTimeoutError, GDELTAdapter, WorldBankAdapter
+from ignifer.adapters import (
+    AdapterError,
+    AdapterTimeoutError,
+    GDELTAdapter,
+    WikidataAdapter,
+    WorldBankAdapter,
+)
 from ignifer.cache import CacheManager
 from ignifer.config import configure_logging, get_settings
 from ignifer.models import QueryParams, ResultStatus
@@ -29,6 +36,7 @@ mcp = FastMCP("ignifer")
 _cache: CacheManager | None = None
 _adapter: GDELTAdapter | None = None
 _worldbank: WorldBankAdapter | None = None
+_wikidata: WikidataAdapter | None = None
 _formatter: OutputFormatter | None = None
 
 
@@ -53,11 +61,60 @@ def _get_worldbank() -> WorldBankAdapter:
     return _worldbank
 
 
+def _get_wikidata() -> WikidataAdapter:
+    global _wikidata
+    if _wikidata is None:
+        _wikidata = WikidataAdapter(cache=_get_cache())
+    return _wikidata
+
+
 def _get_formatter() -> OutputFormatter:
     global _formatter
     if _formatter is None:
         _formatter = OutputFormatter()
     return _formatter
+
+
+async def _cleanup_resources() -> None:
+    """Close all open resources (adapters, cache connections)."""
+    global _adapter, _worldbank, _wikidata, _cache
+
+    if _adapter is not None:
+        await _adapter.close()
+        _adapter = None
+
+    if _worldbank is not None:
+        await _worldbank.close()
+        _worldbank = None
+
+    if _wikidata is not None:
+        await _wikidata.close()
+        _wikidata = None
+
+    if _cache is not None:
+        await _cache.close()
+        _cache = None
+
+    logger.debug("All resources cleaned up")
+
+
+def _atexit_cleanup() -> None:
+    """Synchronous atexit handler that runs async cleanup."""
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            # Schedule cleanup in running loop
+            loop.create_task(_cleanup_resources())
+        else:
+            # Run cleanup in new loop
+            asyncio.run(_cleanup_resources())
+    except Exception as e:
+        # Don't let cleanup errors prevent shutdown
+        logger.debug(f"Cleanup error (non-fatal): {e}")
+
+
+# Register cleanup on process exit
+atexit.register(_atexit_cleanup)
 
 
 async def _extract_single_article(url: str, language: str = "") -> dict[str, str | None]:
@@ -370,30 +427,128 @@ async def extract_article(url: str) -> str:
         return f"Error extracting article: {e}"
 
 
+async def _get_economic_events(country: str, days: int = 7) -> list[dict[str, Any]]:
+    """Query GDELT for recent economic events mentioning the country.
+
+    Args:
+        country: Country name to search for
+        days: Number of days to look back (default 7)
+
+    Returns:
+        List of up to 5 recent economic event articles
+    """
+    try:
+        gdelt = _get_adapter()
+        query = f"{country} (economy OR sanctions OR trade OR tariffs OR inflation OR currency)"
+        params = QueryParams(query=query, time_range=f"last {days} days")
+        result = await gdelt.query(params)
+
+        if result.status == ResultStatus.SUCCESS and result.results:
+            return result.results[:5]
+    except Exception as e:
+        logger.debug(f"Failed to get economic events for {country}: {e}")
+
+    return []
+
+
+async def _get_country_context(country: str) -> dict[str, Any] | None:
+    """Query Wikidata for country institutional context.
+
+    Args:
+        country: Country name to search for
+
+    Returns:
+        Dict with head_of_government, currency, etc. or None if lookup fails
+    """
+    try:
+        wikidata = _get_wikidata()
+
+        # Step 1: Search for the country to get its Q-ID
+        params = QueryParams(query=country)
+        search_result = await wikidata.query(params)
+
+        if search_result.status != ResultStatus.SUCCESS or not search_result.results:
+            return None
+
+        qid = search_result.results[0].get("qid")
+        if not qid:
+            return None
+
+        # Step 2: Lookup by Q-ID to get full properties
+        entity_result = await wikidata.lookup_by_qid(qid)
+
+        if entity_result.status != ResultStatus.SUCCESS or not entity_result.results:
+            return None
+
+        # Properties are flattened directly on the entity
+        entity = entity_result.results[0]
+
+        return {
+            "head_of_government": entity.get("head_of_government"),
+            "head_of_state": entity.get("head_of_state"),
+            "currency": entity.get("currency"),
+            "central_bank": entity.get("central_bank"),
+            "member_of": entity.get("member_of"),
+        }
+    except Exception as e:
+        logger.debug(f"Failed to get country context for {country}: {e}")
+
+    return None
+
+
 @mcp.tool()
 async def economic_context(country: str) -> str:
-    """Get economic indicators for any country.
+    """Get comprehensive economic analysis for any country.
 
-    Returns key economic data including GDP, inflation, unemployment,
-    and trade balance from World Bank official statistics.
+    Returns economic indicators organized by E-series analysis categories:
+    - Key indicators (GDP, population)
+    - Vulnerability assessment (E1): debt ratios, reserves
+    - Trade profile (E2): exports, imports, openness
+    - Financial indicators (E4): inflation, FDI, credit
+
+    Also includes recent economic events from GDELT and government context
+    from Wikidata when available.
 
     Args:
         country: Country name (e.g., "Germany", "Japan") or ISO code (e.g., "DEU", "JPN")
 
     Returns:
-        Formatted economic summary with source attribution.
+        Formatted economic analysis with source attribution.
     """
     logger.info(f"Economic context requested for: {country}")
 
-    # Indicators to query
-    indicators = [
+    # E-series organized indicators
+    core_indicators = [
         ("GDP", "gdp"),
         ("GDP per Capita", "gdp per capita"),
-        ("Inflation", "inflation"),
-        ("Unemployment", "unemployment"),
-        ("Trade Balance", "trade balance"),
         ("Population", "population"),
     ]
+
+    vulnerability_indicators = [  # E1
+        ("External Debt", "external debt"),
+        ("Current Account", "current account"),
+        ("Total Reserves", "total reserves"),
+        ("Short-term Debt", "short-term debt"),
+    ]
+
+    trade_indicators = [  # E2
+        ("Exports", "exports"),
+        ("Imports", "imports"),
+        ("Trade Openness", "trade openness"),
+        ("Trade Balance", "trade balance"),
+    ]
+
+    financial_indicators = [  # E4
+        ("Inflation", "inflation"),
+        ("Unemployment", "unemployment"),
+        ("FDI Inflows", "fdi inflows"),
+        ("Domestic Credit", "domestic credit"),
+    ]
+
+    all_indicators = (
+        core_indicators + vulnerability_indicators +
+        trade_indicators + financial_indicators
+    )
 
     try:
         adapter = _get_worldbank()
@@ -401,7 +556,7 @@ async def economic_context(country: str) -> str:
         rate_limited = False
 
         # Query each indicator
-        for label, indicator_name in indicators:
+        for label, indicator_name in all_indicators:
             params = QueryParams(query=f"{indicator_name} {country}")
             result = await adapter.query(params)
 
@@ -410,7 +565,6 @@ async def economic_context(country: str) -> str:
                 break
 
             if result.status == ResultStatus.SUCCESS and result.results:
-                # Get the most recent year's data
                 sorted_results = sorted(
                     result.results,
                     key=lambda x: str(x.get("year", "")),
@@ -448,61 +602,147 @@ async def economic_context(country: str) -> str:
         country_name = first_result.get("country", country)
         year = first_result.get("year", "N/A")
 
-        # Format output
-        output = "═" * 55 + "\n"
-        output += f"{'ECONOMIC CONTEXT':^55}\n"
-        output += "═" * 55 + "\n"
-        output += f"COUNTRY: {country_name}\n\n"
-        output += f"KEY INDICATORS ({year}):\n"
+        # Fetch auxiliary data concurrently (silent degradation)
+        context_task = asyncio.create_task(_get_country_context(country_name))
+        events_task = asyncio.create_task(_get_economic_events(country_name))
 
-        # Format GDP
+        country_context = await context_task
+        economic_events = await events_task
+
+        # Track which sources contributed
+        sources_used = ["World Bank Open Data"]
+
+        # Format output
+        output = "═" * 59 + "\n"
+        output += f"{'ECONOMIC CONTEXT':^59}\n"
+        output += "═" * 59 + "\n"
+        output += f"COUNTRY: {country_name}\n"
+
+        # Add government/currency context if available
+        if country_context:
+            sources_used.append("Wikidata")
+            context_parts = []
+            if country_context.get("head_of_government"):
+                context_parts.append(country_context["head_of_government"])
+            if country_context.get("currency"):
+                context_parts.append(f"Currency: {country_context['currency']}")
+            if context_parts:
+                output += " | ".join(context_parts) + "\n"
+
+        output += "\n"
+
+        # === KEY INDICATORS ===
+        output += f"KEY INDICATORS ({year}):\n"
         if "GDP" in all_results:
             gdp_val = all_results["GDP"].get("value")
             if gdp_val is not None:
                 gdp_trillion = gdp_val / 1_000_000_000_000
-                output += f"  GDP:              ${gdp_trillion:.2f} trillion\n"
-
-        # Format GDP per Capita
+                output += f"  GDP .................... ${gdp_trillion:.2f} trillion\n"
         if "GDP per Capita" in all_results:
             gdp_pc = all_results["GDP per Capita"].get("value")
             if gdp_pc is not None:
-                output += f"  GDP per Capita:   ${gdp_pc:,.0f}\n"
-
-        # Format Inflation
-        if "Inflation" in all_results:
-            inflation = all_results["Inflation"].get("value")
-            if inflation is not None:
-                output += f"  Inflation:        {inflation:.1f}%\n"
-
-        # Format Unemployment
-        if "Unemployment" in all_results:
-            unemployment = all_results["Unemployment"].get("value")
-            if unemployment is not None:
-                output += f"  Unemployment:     {unemployment:.1f}%\n"
-
-        # Format Trade Balance
-        if "Trade Balance" in all_results:
-            trade = all_results["Trade Balance"].get("value")
-            if trade is not None:
-                trade_billion = trade / 1_000_000_000
-                if trade >= 0:
-                    output += f"  Trade Balance:    +${trade_billion:.1f} billion\n"
-                else:
-                    output += f"  Trade Balance:    -${abs(trade_billion):.1f} billion\n"
-
-        # Format Population
+                output += f"  GDP per Capita ......... ${gdp_pc:,.0f}\n"
         if "Population" in all_results:
             pop = all_results["Population"].get("value")
             if pop is not None:
                 pop_million = pop / 1_000_000
-                output += f"  Population:       {pop_million:.1f} million\n"
+                output += f"  Population ............. {pop_million:.1f} million\n"
+
+        # === VULNERABILITY ASSESSMENT (E1) ===
+        e1_items = []
+        if "External Debt" in all_results:
+            val = all_results["External Debt"].get("value")
+            if val is not None:
+                e1_items.append(f"  External Debt .......... {val:.1f}% of GNI\n")
+        if "Current Account" in all_results:
+            val = all_results["Current Account"].get("value")
+            if val is not None:
+                sign = "+" if val >= 0 else ""
+                e1_items.append(f"  Current Account ........ {sign}{val:.1f}% of GDP\n")
+        if "Total Reserves" in all_results:
+            val = all_results["Total Reserves"].get("value")
+            if val is not None:
+                e1_items.append(f"  Reserves ............... {val:.1f} months imports\n")
+        if "Short-term Debt" in all_results:
+            val = all_results["Short-term Debt"].get("value")
+            if val is not None:
+                e1_items.append(f"  Short-term Debt ........ {val:.1f}% of reserves\n")
+
+        if e1_items:
+            output += "\nVULNERABILITY ASSESSMENT (E1):\n"
+            output += "".join(e1_items)
+
+        # === TRADE PROFILE (E2) ===
+        e2_items = []
+        if "Exports" in all_results:
+            val = all_results["Exports"].get("value")
+            if val is not None:
+                e2_items.append(f"  Exports ................ {val:.1f}% of GDP\n")
+        if "Imports" in all_results:
+            val = all_results["Imports"].get("value")
+            if val is not None:
+                e2_items.append(f"  Imports ................ {val:.1f}% of GDP\n")
+        if "Trade Openness" in all_results:
+            val = all_results["Trade Openness"].get("value")
+            if val is not None:
+                e2_items.append(f"  Trade Openness ......... {val:.1f}% of GDP\n")
+        if "Trade Balance" in all_results:
+            trade = all_results["Trade Balance"].get("value")
+            if trade is not None:
+                trade_billion = trade / 1_000_000_000
+                sign = "+" if trade >= 0 else "-"
+                e2_items.append(
+                    f"  Trade Balance .......... {sign}${abs(trade_billion):.1f} billion\n"
+                )
+
+        if e2_items:
+            output += "\nTRADE PROFILE (E2):\n"
+            output += "".join(e2_items)
+
+        # === FINANCIAL INDICATORS (E4) ===
+        e4_items = []
+        if "Inflation" in all_results:
+            val = all_results["Inflation"].get("value")
+            if val is not None:
+                e4_items.append(f"  Inflation .............. {val:.1f}%\n")
+        if "Unemployment" in all_results:
+            val = all_results["Unemployment"].get("value")
+            if val is not None:
+                e4_items.append(f"  Unemployment ........... {val:.1f}%\n")
+        if "FDI Inflows" in all_results:
+            val = all_results["FDI Inflows"].get("value")
+            if val is not None:
+                e4_items.append(f"  FDI Inflows ............ {val:.1f}% of GDP\n")
+        if "Domestic Credit" in all_results:
+            val = all_results["Domestic Credit"].get("value")
+            if val is not None:
+                e4_items.append(f"  Domestic Credit ........ {val:.1f}% of GDP\n")
+
+        if e4_items:
+            output += "\nFINANCIAL INDICATORS (E4):\n"
+            output += "".join(e4_items)
+
+        # === RECENT ECONOMIC EVENTS ===
+        if economic_events:
+            sources_used.append("GDELT")
+            output += "\nRECENT ECONOMIC EVENTS:\n"
+            for event in economic_events:
+                title = event.get("title", "")
+                date = event.get("seendate", "")[:10] if event.get("seendate") else ""
+                # Truncate title if too long
+                if len(title) > 50:
+                    title = title[:47] + "..."
+                if date and title:
+                    output += f"  • [{date}] {title}\n"
+                elif title:
+                    output += f"  • {title}\n"
 
         # Footer
-        output += "\n" + "─" * 55 + "\n"
-        output += "Source: World Bank Open Data\n"
+        output += "\n" + "─" * 59 + "\n"
+        output += f"Sources: {', '.join(sources_used)}\n"
         retrieved_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
         output += f"Retrieved: {retrieved_at}\n"
-        output += "═" * 55 + "\n"
+        output += "═" * 59 + "\n"
 
         logger.info(f"Economic context completed for: {country}")
         return output
@@ -519,7 +759,6 @@ async def economic_context(country: str) -> str:
 
     except AdapterError as e:
         logger.error(f"Adapter error for {country}: {e}")
-        # Check if it's a rate limit issue
         if "rate limit" in str(e).lower():
             return (
                 "## Service Temporarily Unavailable\n\n"
