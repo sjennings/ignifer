@@ -122,10 +122,47 @@ class AdapterAuthError(AdapterError):
         self.details = details
 
 
+def handle_http_status(
+    source_name: str,
+    status_code: int,
+    no_data_error_msg: str = "Resource not found.",
+) -> tuple[str, Exception | None]:
+    """Handle HTTP status codes and return appropriate result type.
+
+    Args:
+        source_name: Name of the adapter (for error messages)
+        status_code: HTTP response status code
+        no_data_error_msg: Custom error message for 404 responses
+
+    Returns:
+        Tuple of (result_type, exception_or_none) where result_type is:
+        - "success" for 2xx codes
+        - "rate_limited" for 429
+        - "no_data" for 404
+        - "server_error" for 5xx (returns AdapterTimeoutError)
+        - "client_error" for other 4xx (returns AdapterParseError)
+
+    Note:
+        Callers should check result_type and either return an OSINTResult
+        or raise the provided exception.
+    """
+    if 200 <= status_code < 300:
+        return "success", None
+    elif status_code == 429:
+        return "rate_limited", None
+    elif status_code == 404:
+        return "no_data", None
+    elif status_code >= 500:
+        return "server_error", AdapterTimeoutError(source_name)
+    else:
+        return "client_error", AdapterParseError(source_name, f"HTTP {status_code} error")
+
+
 __all__ = [
     "OSINTAdapter",
     "AdapterError",
     "AdapterTimeoutError",
     "AdapterParseError",
     "AdapterAuthError",
+    "handle_http_status",
 ]

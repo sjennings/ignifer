@@ -79,17 +79,12 @@ async def _cleanup_resources() -> None:
     """Close all open resources (adapters, cache connections)."""
     global _adapter, _worldbank, _wikidata, _cache
 
-    if _adapter is not None:
-        await _adapter.close()
-        _adapter = None
-
-    if _worldbank is not None:
-        await _worldbank.close()
-        _worldbank = None
-
-    if _wikidata is not None:
-        await _wikidata.close()
-        _wikidata = None
+    # Close adapters first, then cache (adapters may use cache)
+    adapters = [(_adapter, "_adapter"), (_worldbank, "_worldbank"), (_wikidata, "_wikidata")]
+    for adapter, name in adapters:
+        if adapter is not None:
+            await adapter.close()
+            globals()[name] = None
 
     if _cache is not None:
         await _cache.close()
@@ -496,6 +491,114 @@ async def _get_country_context(country: str) -> dict[str, Any] | None:
     return None
 
 
+# Indicator formatting configuration: (label, query_name, format_func)
+# Format functions receive the value and return formatted string or None
+def _fmt_trillion(v: float) -> str:
+    """Format as USD trillions."""
+    return f"${v / 1_000_000_000_000:.2f} trillion"
+
+
+def _fmt_currency(v: float) -> str:
+    """Format as USD with commas."""
+    return f"${v:,.0f}"
+
+
+def _fmt_million(v: float) -> str:
+    """Format as millions."""
+    return f"{v / 1_000_000:.1f} million"
+
+
+def _fmt_pct_gni(v: float) -> str:
+    """Format as percentage of GNI."""
+    return f"{v:.1f}% of GNI"
+
+
+def _fmt_pct_gdp_signed(v: float) -> str:
+    """Format as signed percentage of GDP."""
+    sign = "+" if v >= 0 else ""
+    return f"{sign}{v:.1f}% of GDP"
+
+
+def _fmt_months(v: float) -> str:
+    """Format as months of imports."""
+    return f"{v:.1f} months imports"
+
+
+def _fmt_pct_reserves(v: float) -> str:
+    """Format as percentage of reserves."""
+    return f"{v:.1f}% of reserves"
+
+
+def _fmt_pct_gdp(v: float) -> str:
+    """Format as percentage of GDP."""
+    return f"{v:.1f}% of GDP"
+
+
+def _fmt_billion_signed(v: float) -> str:
+    """Format as signed USD billions."""
+    sign = "+" if v >= 0 else "-"
+    return f"{sign}${abs(v / 1_000_000_000):.1f} billion"
+
+
+def _fmt_pct(v: float) -> str:
+    """Format as percentage."""
+    return f"{v:.1f}%"
+
+
+# Indicator definitions: (display_label, query_term, formatter, display_name_width)
+CORE_INDICATORS = [
+    ("GDP", "gdp", _fmt_trillion, "GDP"),
+    ("GDP per Capita", "gdp per capita", _fmt_currency, "GDP per Capita"),
+    ("Population", "population", _fmt_million, "Population"),
+]
+
+E1_VULNERABILITY_INDICATORS = [
+    ("External Debt", "external debt", _fmt_pct_gni, "External Debt"),
+    ("Current Account", "current account", _fmt_pct_gdp_signed, "Current Account"),
+    ("Total Reserves", "total reserves", _fmt_months, "Reserves"),
+    ("Short-term Debt", "short-term debt", _fmt_pct_reserves, "Short-term Debt"),
+]
+
+E2_TRADE_INDICATORS = [
+    ("Exports", "exports", _fmt_pct_gdp, "Exports"),
+    ("Imports", "imports", _fmt_pct_gdp, "Imports"),
+    ("Trade Openness", "trade openness", _fmt_pct_gdp, "Trade Openness"),
+    ("Trade Balance", "trade balance", _fmt_billion_signed, "Trade Balance"),
+]
+
+E4_FINANCIAL_INDICATORS = [
+    ("Inflation", "inflation", _fmt_pct, "Inflation"),
+    ("Unemployment", "unemployment", _fmt_pct, "Unemployment"),
+    ("FDI Inflows", "fdi inflows", _fmt_pct_gdp, "FDI Inflows"),
+    ("Domestic Credit", "domestic credit", _fmt_pct_gdp, "Domestic Credit"),
+]
+
+
+def _format_indicator_section(
+    all_results: dict[str, dict[str, Any]],
+    indicators: list[tuple[str, str, Any, str]],
+) -> list[str]:
+    """Format a section of economic indicators.
+
+    Args:
+        all_results: Dictionary of indicator label -> result dict
+        indicators: List of (key, query_term, formatter, display_name) tuples
+
+    Returns:
+        List of formatted lines (empty if no data)
+    """
+    lines = []
+    for key, _, formatter, display_name in indicators:
+        if key in all_results:
+            val = all_results[key].get("value")
+            if val is not None:
+                formatted = formatter(val)
+                # Pad display name to align values
+                padded_name = f"{display_name} ".ljust(22, ".")
+                lines.append(f"  {padded_name} {formatted}\n")
+    return lines
+
+
 @mcp.tool()
 async def economic_context(country: str) -> str:
     """Get comprehensive economic analysis for any country.
@@ -517,37 +620,10 @@ async def economic_context(country: str) -> str:
     """
     logger.info(f"Economic context requested for: {country}")
 
-    # E-series organized indicators
-    core_indicators = [
-        ("GDP", "gdp"),
-        ("GDP per Capita", "gdp per capita"),
-        ("Population", "population"),
-    ]
-
-    vulnerability_indicators = [  # E1
-        ("External Debt", "external debt"),
-        ("Current Account", "current account"),
-        ("Total Reserves", "total reserves"),
-        ("Short-term Debt", "short-term debt"),
-    ]
-
-    trade_indicators = [  # E2
-        ("Exports", "exports"),
-        ("Imports", "imports"),
-        ("Trade Openness", "trade openness"),
-        ("Trade Balance", "trade balance"),
-    ]
-
-    financial_indicators = [  # E4
-        ("Inflation", "inflation"),
-        ("Unemployment", "unemployment"),
-        ("FDI Inflows", "fdi inflows"),
-        ("Domestic Credit", "domestic credit"),
-    ]
-
-    all_indicators = (
-        core_indicators + vulnerability_indicators +
-        trade_indicators + financial_indicators
+    # Build flat list of all indicators for querying
+    all_indicator_defs = (
+        CORE_INDICATORS + E1_VULNERABILITY_INDICATORS +
+        E2_TRADE_INDICATORS + E4_FINANCIAL_INDICATORS
     )
 
     try:
@@ -556,8 +632,8 @@ async def economic_context(country: str) -> str:
         rate_limited = False
 
         # Query each indicator
-        for label, indicator_name in all_indicators:
-            params = QueryParams(query=f"{indicator_name} {country}")
+        for label, query_term, _, _ in all_indicator_defs:
+            params = QueryParams(query=f"{query_term} {country}")
             result = await adapter.query(params)
 
             if result.status == ResultStatus.RATE_LIMITED:
@@ -633,94 +709,25 @@ async def economic_context(country: str) -> str:
 
         # === KEY INDICATORS ===
         output += f"KEY INDICATORS ({year}):\n"
-        if "GDP" in all_results:
-            gdp_val = all_results["GDP"].get("value")
-            if gdp_val is not None:
-                gdp_trillion = gdp_val / 1_000_000_000_000
-                output += f"  GDP .................... ${gdp_trillion:.2f} trillion\n"
-        if "GDP per Capita" in all_results:
-            gdp_pc = all_results["GDP per Capita"].get("value")
-            if gdp_pc is not None:
-                output += f"  GDP per Capita ......... ${gdp_pc:,.0f}\n"
-        if "Population" in all_results:
-            pop = all_results["Population"].get("value")
-            if pop is not None:
-                pop_million = pop / 1_000_000
-                output += f"  Population ............. {pop_million:.1f} million\n"
+        output += "".join(_format_indicator_section(all_results, CORE_INDICATORS))
 
         # === VULNERABILITY ASSESSMENT (E1) ===
-        e1_items = []
-        if "External Debt" in all_results:
-            val = all_results["External Debt"].get("value")
-            if val is not None:
-                e1_items.append(f"  External Debt .......... {val:.1f}% of GNI\n")
-        if "Current Account" in all_results:
-            val = all_results["Current Account"].get("value")
-            if val is not None:
-                sign = "+" if val >= 0 else ""
-                e1_items.append(f"  Current Account ........ {sign}{val:.1f}% of GDP\n")
-        if "Total Reserves" in all_results:
-            val = all_results["Total Reserves"].get("value")
-            if val is not None:
-                e1_items.append(f"  Reserves ............... {val:.1f} months imports\n")
-        if "Short-term Debt" in all_results:
-            val = all_results["Short-term Debt"].get("value")
-            if val is not None:
-                e1_items.append(f"  Short-term Debt ........ {val:.1f}% of reserves\n")
-
-        if e1_items:
+        e1_lines = _format_indicator_section(all_results, E1_VULNERABILITY_INDICATORS)
+        if e1_lines:
             output += "\nVULNERABILITY ASSESSMENT (E1):\n"
-            output += "".join(e1_items)
+            output += "".join(e1_lines)
 
         # === TRADE PROFILE (E2) ===
-        e2_items = []
-        if "Exports" in all_results:
-            val = all_results["Exports"].get("value")
-            if val is not None:
-                e2_items.append(f"  Exports ................ {val:.1f}% of GDP\n")
-        if "Imports" in all_results:
-            val = all_results["Imports"].get("value")
-            if val is not None:
-                e2_items.append(f"  Imports ................ {val:.1f}% of GDP\n")
-        if "Trade Openness" in all_results:
-            val = all_results["Trade Openness"].get("value")
-            if val is not None:
-                e2_items.append(f"  Trade Openness ......... {val:.1f}% of GDP\n")
-        if "Trade Balance" in all_results:
-            trade = all_results["Trade Balance"].get("value")
-            if trade is not None:
-                trade_billion = trade / 1_000_000_000
-                sign = "+" if trade >= 0 else "-"
-                e2_items.append(
-                    f"  Trade Balance .......... {sign}${abs(trade_billion):.1f} billion\n"
-                )
-
-        if e2_items:
+        e2_lines = _format_indicator_section(all_results, E2_TRADE_INDICATORS)
+        if e2_lines:
             output += "\nTRADE PROFILE (E2):\n"
-            output += "".join(e2_items)
+            output += "".join(e2_lines)
 
         # === FINANCIAL INDICATORS (E4) ===
-        e4_items = []
-        if "Inflation" in all_results:
-            val = all_results["Inflation"].get("value")
-            if val is not None:
-                e4_items.append(f"  Inflation .............. {val:.1f}%\n")
-        if "Unemployment" in all_results:
-            val = all_results["Unemployment"].get("value")
-            if val is not None:
-                e4_items.append(f"  Unemployment ........... {val:.1f}%\n")
-        if "FDI Inflows" in all_results:
-            val = all_results["FDI Inflows"].get("value")
-            if val is not None:
-                e4_items.append(f"  FDI Inflows ............ {val:.1f}% of GDP\n")
-        if "Domestic Credit" in all_results:
-            val = all_results["Domestic Credit"].get("value")
-            if val is not None:
-                e4_items.append(f"  Domestic Credit ........ {val:.1f}% of GDP\n")
-
-        if e4_items:
+        e4_lines = _format_indicator_section(all_results, E4_FINANCIAL_INDICATORS)
+        if e4_lines:
             output += "\nFINANCIAL INDICATORS (E4):\n"
-            output += "".join(e4_items)
+            output += "".join(e4_lines)
 
         # === RECENT ECONOMIC EVENTS ===
         if economic_events:
@@ -733,16 +740,16 @@ async def economic_context(country: str) -> str:
                 if len(title) > 50:
                     title = title[:47] + "..."
                 if date and title:
-                    output += f"  • [{date}] {title}\n"
+                    output += f"  \u2022 [{date}] {title}\n"
                 elif title:
-                    output += f"  • {title}\n"
+                    output += f"  \u2022 {title}\n"
 
         # Footer
-        output += "\n" + "─" * 59 + "\n"
+        output += "\n" + "\u2500" * 59 + "\n"
         output += f"Sources: {', '.join(sources_used)}\n"
         retrieved_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
         output += f"Retrieved: {retrieved_at}\n"
-        output += "═" * 59 + "\n"
+        output += "\u2550" * 59 + "\n"
 
         logger.info(f"Economic context completed for: {country}")
         return output

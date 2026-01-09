@@ -12,7 +12,7 @@ from typing import Any
 
 import httpx
 
-from ignifer.adapters.base import AdapterParseError, AdapterTimeoutError
+from ignifer.adapters.base import AdapterParseError, AdapterTimeoutError, handle_http_status
 
 # Regex pattern for valid Wikidata Q-ID format (Q followed by one or more digits)
 QID_PATTERN = re.compile(r"^Q\d+$")
@@ -330,8 +330,11 @@ class WikidataAdapter:
                 self.source_name, self.DEFAULT_TIMEOUT
             ) from e
 
-        # Check HTTP status codes before parsing JSON
-        if response.status_code == 429:
+        # Handle HTTP status codes
+        status_type, exc = handle_http_status(
+            self.source_name, response.status_code, "Wikidata API endpoint not found."
+        )
+        if status_type == "rate_limited":
             logger.warning("Wikidata rate limited")
             return OSINTResult(
                 status=ResultStatus.RATE_LIMITED,
@@ -340,16 +343,7 @@ class WikidataAdapter:
                 sources=[],
                 retrieved_at=datetime.now(timezone.utc),
             )
-
-        if response.status_code >= 500:
-            # Server errors (5xx) indicate service unavailability
-            logger.error(f"Wikidata server error: {response.status_code}")
-            raise AdapterTimeoutError(
-                self.source_name, self.DEFAULT_TIMEOUT
-            )
-
-        if response.status_code == 404:
-            # Not found - return NO_DATA
+        if status_type == "no_data":
             return OSINTResult(
                 status=ResultStatus.NO_DATA,
                 query=params.query,
@@ -358,13 +352,9 @@ class WikidataAdapter:
                 retrieved_at=datetime.now(timezone.utc),
                 error="Wikidata API endpoint not found.",
             )
-
-        if response.status_code >= 400:
-            # Other client errors (4xx)
-            logger.error(f"Wikidata client error: {response.status_code}")
-            raise AdapterParseError(
-                self.source_name, f"HTTP {response.status_code} error"
-            )
+        if exc:
+            logger.error(f"Wikidata HTTP error: {response.status_code}")
+            raise exc
 
         # Parse response
         try:
@@ -515,8 +505,11 @@ class WikidataAdapter:
                 self.source_name, self.DEFAULT_TIMEOUT
             ) from e
 
-        # Check HTTP status codes before parsing JSON
-        if response.status_code == 429:
+        # Handle HTTP status codes
+        status_type, exc = handle_http_status(
+            self.source_name, response.status_code, f"Entity {qid} not found in Wikidata."
+        )
+        if status_type == "rate_limited":
             logger.warning("Wikidata rate limited")
             return OSINTResult(
                 status=ResultStatus.RATE_LIMITED,
@@ -525,16 +518,7 @@ class WikidataAdapter:
                 sources=[],
                 retrieved_at=datetime.now(timezone.utc),
             )
-
-        if response.status_code >= 500:
-            # Server errors (5xx) indicate service unavailability
-            logger.error(f"Wikidata server error: {response.status_code}")
-            raise AdapterTimeoutError(
-                self.source_name, self.DEFAULT_TIMEOUT
-            )
-
-        if response.status_code == 404:
-            # Not found - return NO_DATA
+        if status_type == "no_data":
             return OSINTResult(
                 status=ResultStatus.NO_DATA,
                 query=qid,
@@ -543,13 +527,9 @@ class WikidataAdapter:
                 retrieved_at=datetime.now(timezone.utc),
                 error=f"Entity {qid} not found in Wikidata.",
             )
-
-        if response.status_code >= 400:
-            # Other client errors (4xx)
-            logger.error(f"Wikidata client error: {response.status_code}")
-            raise AdapterParseError(
-                self.source_name, f"HTTP {response.status_code} error"
-            )
+        if exc:
+            logger.error(f"Wikidata HTTP error: {response.status_code}")
+            raise exc
 
         # Parse response
         try:

@@ -6,6 +6,7 @@ from ignifer.adapters.base import (
     AdapterParseError,
     AdapterTimeoutError,
     OSINTAdapter,
+    handle_http_status,
 )
 from ignifer.adapters.gdelt import GDELTAdapter
 from ignifer.adapters.wikidata import WikidataAdapter
@@ -20,4 +21,5 @@ __all__ = [
     "GDELTAdapter",
     "WikidataAdapter",
     "WorldBankAdapter",
+    "handle_http_status",
 ]
