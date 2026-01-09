@@ -398,11 +398,16 @@ async def economic_context(country: str) -> str:
     try:
         adapter = _get_worldbank()
         all_results: dict[str, dict[str, Any]] = {}
+        rate_limited = False
 
         # Query each indicator
         for label, indicator_name in indicators:
             params = QueryParams(query=f"{indicator_name} {country}")
             result = await adapter.query(params)
+
+            if result.status == ResultStatus.RATE_LIMITED:
+                rate_limited = True
+                break
 
             if result.status == ResultStatus.SUCCESS and result.results:
                 # Get the most recent year's data
@@ -413,6 +418,18 @@ async def economic_context(country: str) -> str:
                 )
                 if sorted_results:
                     all_results[label] = sorted_results[0]
+
+        # If rate limited, inform the user
+        if rate_limited:
+            logger.warning(f"Rate limited when fetching data for: {country}")
+            return (
+                "## Service Temporarily Unavailable\n\n"
+                "World Bank API is rate limiting requests. "
+                "Try again in a few minutes.\n\n"
+                "**Suggestions:**\n"
+                "- Wait a few minutes before trying again\n"
+                "- Results may be cached - try your last query again"
+            )
 
         # If no results at all, country not found
         if not all_results:
@@ -505,11 +522,11 @@ async def economic_context(country: str) -> str:
         # Check if it's a rate limit issue
         if "rate limit" in str(e).lower():
             return (
-                f"## Service Temporarily Unavailable\n\n"
-                f"World Bank API is rate limiting requests.\n\n"
-                f"**Suggestions:**\n"
-                f"- Wait a few minutes before trying again\n"
-                f"- Results may be cached - try your last query again"
+                "## Service Temporarily Unavailable\n\n"
+                "World Bank API is rate limiting requests.\n\n"
+                "**Suggestions:**\n"
+                "- Wait a few minutes before trying again\n"
+                "- Results may be cached - try your last query again"
             )
         return (
             f"## Unable to Retrieve Data\n\n"
