@@ -247,7 +247,34 @@ class GDELTClient:  # Should be GDELTAdapter
 
 # WRONG: Adapter importing from server
 from ignifer.server import ...  # NO! Layer violation
+
+# WRONG: Hardcoding reference data from APIs
+COUNTRY_CODES = {"usa": "USA", "germany": "DEU"}  # NO! Incomplete
+# Instead: Fetch dynamically from API and cache in memory
 ```
+
+### External API Reference Data
+
+When an API provides reference data (country lists, indicator codes, etc.), **fetch dynamically and cache** rather than hardcoding:
+
+```python
+# CORRECT: Dynamic lookup with in-memory cache
+class WorldBankAdapter:
+    def __init__(self):
+        self._country_lookup: dict[str, str] | None = None
+
+    async def _ensure_country_lookup(self) -> dict[str, str]:
+        if self._country_lookup is not None:
+            return self._country_lookup
+        # Fetch from API: /v2/country?format=json&per_page=400
+        # Build lookup mapping names and codes
+        self._country_lookup = lookup
+        return lookup
+```
+
+**World Bank API endpoints:**
+- Countries: `https://api.worldbank.org/v2/country?format=json&per_page=400`
+- Indicators: `https://api.worldbank.org/v2/indicator/{code}/country/{iso3}?format=json`
 
 ---
 
