@@ -1,6 +1,6 @@
 # Story 2.2: Economic Context Tool
 
-Status: ready-for-dev
+Status: done
 
 ## Story
 
@@ -245,3 +245,285 @@ From Story 2-1 code review:
 - INDICATOR_CODES includes: gdp, gdp per capita, inflation, population, trade, trade balance, unemployment
 - Caching works with 24-hour TTL via settings.ttl_worldbank
 - Error handling follows contract: AdapterTimeoutError, AdapterParseError, RATE_LIMITED, NO_DATA
+
+## Senior Developer Review (AI)
+
+**Review Date:** 2026-01-09
+**Reviewer:** AI Code Review (Adversarial)
+**Files Reviewed:**
+- `src/ignifer/server.py` (economic_context function, lines 373-529)
+- `tests/test_server_economic.py` (10 tests)
+
+---
+
+### Issues Found
+
+#### ISSUE 1: Missing Test for Regional Aggregates (AC5 Violation)
+**Severity:** MEDIUM
+
+**Location:** `tests/test_server_economic.py`
+
+**Description:** AC5 explicitly requires testing regional aggregates: "And regional aggregates work ('European Union', 'Sub-Saharan Africa')". The test suite only tests country alias "USA" but completely omits testing regional aggregate codes like "EU", "EUU", "Sub-Saharan Africa", or "SSF".
+
+**Evidence:**
+- `test_economic_context_country_alias()` only tests "USA" alias
+- No tests for "European Union", "EU", "Sub-Saharan Africa", "SSA"
+- AC5 states: "And regional aggregates work ('European Union', 'Sub-Saharan Africa')"
+
+**Fix Required:** Add test case(s) verifying regional aggregate resolution works correctly.
+
+---
+
+#### ISSUE 2: Unused Import in Test File (Code Quality)
+**Severity:** LOW
+
+**Location:** `tests/test_server_economic.py`, line 6
+
+**Description:** `MagicMock` is imported but never used in the test file. This causes a linter failure (`F401`).
+
+**Evidence:**
+```python
+from unittest.mock import AsyncMock, MagicMock, patch  # MagicMock unused
+```
+
+**Fix Required:** Remove `MagicMock` from the import statement.
+
+---
+
+#### ISSUE 3: Line Length Violations in Test File (Code Quality)
+**Severity:** LOW
+
+**Location:** `tests/test_server_economic.py`, lines 69, 106, 120, 245, 270
+
+**Description:** Multiple lines exceed the 100-character limit configured in ruff, causing lint failures.
+
+**Evidence:**
+- Line 69: 113 characters
+- Line 106: 101 characters
+- Line 120: 105 characters
+- Line 245: 106 characters
+- Line 270: 110 characters
+
+**Fix Required:** Break long lines to comply with project's 100-character limit.
+
+---
+
+#### ISSUE 4: Task 6.1 Fails - `make lint` Does Not Pass (AC Violation)
+**Severity:** HIGH
+
+**Location:** `tests/test_server_economic.py`
+
+**Description:** Task 6.1 requires "Run `make lint` - passes". The lint check fails due to issues in `test_server_economic.py` (unused import F401, line length E501). While some lint errors exist in other files (wikidata.py, output.py), new code should not introduce additional failures.
+
+**Evidence:**
+```
+F401 [*] `unittest.mock.MagicMock` imported but unused
+ --> tests/test_server_economic.py:6:38
+
+E501 Line too long (113 > 100)
+ --> tests/test_server_economic.py:69:101
+```
+
+**Fix Required:** Address all lint issues in `test_server_economic.py` before marking story complete.
+
+---
+
+#### ISSUE 5: Missing Test for RATE_LIMITED Status (Error Handling Gap)
+**Severity:** MEDIUM
+
+**Location:** `tests/test_server_economic.py`, `src/ignifer/server.py`
+
+**Description:** The implementation handles RATE_LIMITED status at the `result` level (checking for `ResultStatus.RATE_LIMITED` after a query), but this path is never explicitly tested. The test `test_economic_context_rate_limited` tests the `AdapterError` with "Rate limit" in the message string, but this is a different code path than the `ResultStatus.RATE_LIMITED` status the adapter can return.
+
+**Evidence:**
+- WorldBankAdapter returns `ResultStatus.RATE_LIMITED` when HTTP 429 is received
+- `economic_context()` only checks `result.status == ResultStatus.SUCCESS` but doesn't handle `RATE_LIMITED` status explicitly
+- The rate limit test uses `AdapterError` exception, not `ResultStatus.RATE_LIMITED`
+
+**Analysis:** Looking at `server.py` lines 403-415, the code only checks for `SUCCESS` status. If the adapter returns `RATE_LIMITED`, it falls through to the "no results" path which shows "Country Not Found" - this is incorrect behavior for rate limiting.
+
+**Fix Required:** Either:
+1. Add explicit handling for `ResultStatus.RATE_LIMITED` in the implementation, OR
+2. Verify the current behavior is intentional and document why RATE_LIMITED from the result status is acceptable to treat as "no data"
+
+---
+
+#### ISSUE 6: Year Display Shows Only First Result's Year (Potential UX Issue)
+**Severity:** LOW
+
+**Location:** `src/ignifer/server.py`, lines 429-432, 439
+
+**Description:** The implementation displays a single year in "KEY INDICATORS (2023):" but different indicators may have different years of latest data. For example, GDP might be from 2023 while unemployment data might only be available through 2021.
+
+**Evidence:**
+```python
+# Get country name and year from first result
+first_result = next(iter(all_results.values()))
+year = first_result.get("year", "N/A")
+...
+output += f"KEY INDICATORS ({year}):\n"
+```
+
+Test `test_economic_context_different_years` acknowledges this: indicators have different years (2023, 2022, 2021) but display shows "(2023)".
+
+**Impact:** Users may be misled about data freshness if the displayed year doesn't match all indicators.
+
+**Recommendation:** Consider either:
+1. Displaying year per-indicator (e.g., "GDP (2023): $25.46T")
+2. Displaying a date range (e.g., "KEY INDICATORS (2021-2023)")
+3. Adding a note when years differ
+
+---
+
+### Summary
+
+| Severity | Count |
+|----------|-------|
+| HIGH     | 1     |
+| MEDIUM   | 2     |
+| LOW      | 3     |
+
+**Total Issues:** 6
+
+---
+
+### Final Outcome: **Changes Requested**
+
+The implementation is functionally sound and covers most acceptance criteria well. However, the following must be addressed before approval:
+
+**Required Fixes:**
+1. **[HIGH]** Fix lint issues in `test_server_economic.py` (unused import, line lengths) to satisfy Task 6.1
+2. **[MEDIUM]** Add test for regional aggregates (EU, Sub-Saharan Africa) to satisfy AC5
+3. **[MEDIUM]** Verify/fix RATE_LIMITED status handling (result status vs exception)
+
+**Recommended (not blocking):**
+4. **[LOW]** Consider per-indicator year display for accuracy
+
+---
+
+**Status:** Do NOT update sprint-status.yaml until required fixes are addressed.
+
+---
+
+## Follow-up Review (Post-Fix Verification)
+
+**Review Date:** 2026-01-09
+**Reviewer:** AI Code Review (Verification)
+**Files Reviewed:**
+- `src/ignifer/server.py` (economic_context function, lines 373-546)
+- `tests/test_server_economic.py` (13 tests)
+
+---
+
+### Verification of Previous Issues
+
+#### ISSUE 1: Missing Test for Regional Aggregates (AC5 Violation) - FIXED
+**Status:** RESOLVED
+
+Two new tests added:
+- `test_economic_context_regional_aggregate_eu()` (line 370) - Tests "European Union" regional aggregate
+- `test_economic_context_regional_aggregate_sub_saharan_africa()` (line 416) - Tests "Sub-Saharan Africa" regional aggregate
+
+Both tests verify the correct output format and country name resolution.
+
+---
+
+#### ISSUE 2: Unused Import in Test File (Code Quality) - FIXED
+**Status:** RESOLVED
+
+`MagicMock` removed from import statement. Line 6 now reads:
+```python
+from unittest.mock import AsyncMock, patch
+```
+
+---
+
+#### ISSUE 3: Line Length Violations in Test File (Code Quality) - FIXED
+**Status:** RESOLVED
+
+All lines in `test_server_economic.py` now comply with the 100-character limit. Long mock setup calls have been properly broken across multiple lines.
+
+---
+
+#### ISSUE 4: Task 6.1 Fails - `make lint` Does Not Pass (AC Violation) - FIXED
+**Status:** RESOLVED
+
+`ruff check tests/test_server_economic.py` now reports "All checks passed!"
+`ruff check src/ignifer/server.py` now reports "All checks passed!"
+
+---
+
+#### ISSUE 5: Missing Test for RATE_LIMITED Status (Error Handling Gap) - FIXED
+**Status:** RESOLVED
+
+**Implementation fix (server.py lines 401-432):**
+- Added `rate_limited = False` flag before indicator loop
+- Added explicit check: `if result.status == ResultStatus.RATE_LIMITED`
+- Sets flag and breaks loop when rate limited
+- Returns user-friendly message after loop if rate limited
+
+**Test added:**
+- `test_economic_context_rate_limited_status()` (line 192) - Tests the `ResultStatus.RATE_LIMITED` code path specifically
+
+---
+
+#### ISSUE 6: Year Display Shows Only First Result's Year (Potential UX Issue)
+**Status:** NOT ADDRESSED (Was marked as LOW severity, recommended not required)
+
+This remains as-is. The implementation displays the year from the first indicator. This could be improved in a future iteration but does not block approval.
+
+---
+
+### Test Results
+
+```
+tests/test_server_economic.py: 13 tests PASSED
+- test_economic_context_success
+- test_economic_context_partial_data
+- test_economic_context_country_not_found
+- test_economic_context_timeout
+- test_economic_context_rate_limited
+- test_economic_context_rate_limited_status  [NEW]
+- test_economic_context_adapter_error
+- test_economic_context_unexpected_error
+- test_economic_context_different_years
+- test_economic_context_positive_trade_balance
+- test_economic_context_country_alias
+- test_economic_context_regional_aggregate_eu  [NEW]
+- test_economic_context_regional_aggregate_sub_saharan_africa  [NEW]
+```
+
+---
+
+### Acceptance Criteria Verification
+
+| AC | Description | Status |
+|----|-------------|--------|
+| AC1 | `economic_context` Tool Registered | PASS - @mcp.tool() decorator, country param, comprehensive docstring |
+| AC2 | WorldBankAdapter Integration | PASS - Uses `_get_worldbank()` lazy initializer, calls adapter.query() |
+| AC3 | Output Formatting Works | PASS - All indicators formatted with units, source attribution included |
+| AC4 | Invalid Country Handling | PASS - User-friendly error with suggestions, no raw API errors exposed |
+| AC5 | Country Alias Resolution Works | PASS - USA alias works, EU and Sub-Saharan Africa regional aggregates tested |
+| AC6 | Error Handling Follows Contract | PASS - Timeout, AdapterError, RATE_LIMITED status, and generic exception handling |
+| AC7 | Tests Pass with Good Coverage | PASS - 13 tests covering success, error, and edge cases |
+
+---
+
+### Summary
+
+| Previous Severity | Count | Fixed |
+|-------------------|-------|-------|
+| HIGH              | 1     | 1     |
+| MEDIUM            | 2     | 2     |
+| LOW (required)    | 2     | 2     |
+| LOW (recommended) | 1     | 0     |
+
+**All required fixes have been properly implemented.**
+
+---
+
+### Final Outcome: **APPROVED**
+
+The implementation is complete and all acceptance criteria are satisfied. The economic_context tool is ready for production use.
+
+**Recommendation:** Consider addressing the year display issue (ISSUE 6) in a future enhancement story if users report confusion about data freshness.

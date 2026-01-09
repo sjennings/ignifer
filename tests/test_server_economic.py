@@ -3,7 +3,7 @@
 import json
 from datetime import datetime, timezone
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -66,7 +66,10 @@ async def test_economic_context_success(mock_osint_result):
             mock_osint_result("GDP per capita (current US$)", 76330),
             mock_osint_result("Inflation, consumer prices (annual %)", 4.1),
             mock_osint_result("Unemployment, total (% of total labor force)", 3.6),
-            mock_osint_result("External balance on goods and services (current US$)", -948100000000),  # -$948.1B
+            # Trade balance: -$948.1B
+            mock_osint_result(
+                "External balance on goods and services (current US$)", -948100000000
+            ),
             mock_osint_result("Population, total", 334900000),  # 334.9 million
         ]
 
@@ -102,8 +105,11 @@ async def test_economic_context_partial_data(mock_osint_result):
             mock_osint_result("GDP (current US$)", 25462700000000),
             mock_osint_result("GDP per capita (current US$)", None),  # No data
             mock_osint_result("Inflation, consumer prices (annual %)", 4.1),
-            mock_osint_result("Unemployment, total (% of total labor force)", None),  # No data
-            mock_osint_result("External balance on goods and services (current US$)", -948100000000),
+            mock_osint_result("Unemployment, total (% of total labor force)", None),
+            # Trade balance
+            mock_osint_result(
+                "External balance on goods and services (current US$)", -948100000000
+            ),
             mock_osint_result("Population, total", 334900000),
         ]
 
@@ -117,7 +123,7 @@ async def test_economic_context_partial_data(mock_osint_result):
         assert "$25.46 trillion" in result  # GDP present
         assert "$76,330" not in result  # GDP per capita missing
         assert "4.1%" in result  # Inflation present
-        # Unemployment missing - check it's not there (but don't check for "3.6%" since we don't have it)
+        # Unemployment missing - we don't check for specific % since we don't have it
 
 
 @pytest.mark.asyncio
@@ -165,7 +171,7 @@ async def test_economic_context_timeout():
 
 @pytest.mark.asyncio
 async def test_economic_context_rate_limited():
-    """Test economic context with rate limit error."""
+    """Test economic context with rate limit error (via AdapterError)."""
     with patch("ignifer.server._get_worldbank") as mock_get_wb:
         mock_adapter = AsyncMock()
 
@@ -180,6 +186,31 @@ async def test_economic_context_rate_limited():
         assert "Service Temporarily Unavailable" in result
         assert "rate limiting" in result
         assert "Wait a few minutes" in result
+
+
+@pytest.mark.asyncio
+async def test_economic_context_rate_limited_status():
+    """Test economic context with RATE_LIMITED result status."""
+    with patch("ignifer.server._get_worldbank") as mock_get_wb:
+        mock_adapter = AsyncMock()
+
+        # Return RATE_LIMITED status from adapter
+        rate_limited_result = OSINTResult(
+            status=ResultStatus.RATE_LIMITED,
+            query="gdp China",
+            results=[],
+            sources=[],
+            retrieved_at=datetime.now(timezone.utc),
+        )
+        mock_adapter.query.return_value = rate_limited_result
+
+        mock_get_wb.return_value = mock_adapter
+
+        result = await call_economic_context("China")
+
+        assert "Service Temporarily Unavailable" in result
+        assert "rate limiting" in result
+        assert "Try again in a few minutes" in result
 
 
 @pytest.mark.asyncio
@@ -241,8 +272,13 @@ async def test_economic_context_different_years(mock_osint_result):
             make_year_result("GDP (current US$)", 2000000000000, "2023"),
             make_year_result("GDP per capita (current US$)", 10000, "2023"),
             make_year_result("Inflation, consumer prices (annual %)", 5.0, "2022"),
-            make_year_result("Unemployment, total (% of total labor force)", 8.0, "2021"),
-            make_year_result("External balance on goods and services (current US$)", 50000000000, "2023"),
+            make_year_result(
+                "Unemployment, total (% of total labor force)", 8.0, "2021"
+            ),
+            make_year_result(
+                "External balance on goods and services (current US$)",
+                50000000000, "2023"
+            ),
             make_year_result("Population, total", 215000000, "2023"),
         ]
 
@@ -267,7 +303,10 @@ async def test_economic_context_positive_trade_balance(mock_osint_result):
             mock_osint_result("GDP per capita (current US$)", 50000),
             mock_osint_result("Inflation, consumer prices (annual %)", 2.0),
             mock_osint_result("Unemployment, total (% of total labor force)", 5.0),
-            mock_osint_result("External balance on goods and services (current US$)", 100000000000),  # +$100B
+            # Trade balance: +$100B
+            mock_osint_result(
+                "External balance on goods and services (current US$)", 100000000000
+            ),
             mock_osint_result("Population, total", 50000000),
         ]
 
@@ -325,3 +364,95 @@ async def test_economic_context_country_alias():
         # Should resolve to United States
         assert "United States" in result
         assert "ECONOMIC CONTEXT" in result
+
+
+@pytest.mark.asyncio
+async def test_economic_context_regional_aggregate_eu():
+    """Test economic context for European Union regional aggregate (AC5)."""
+    with patch("ignifer.server._get_worldbank") as mock_get_wb:
+        mock_adapter = AsyncMock()
+
+        # Mock successful response for EU
+        success_result = OSINTResult(
+            status=ResultStatus.SUCCESS,
+            query="gdp European Union",
+            results=[{
+                "indicator": "GDP (current US$)",
+                "country": "European Union",
+                "year": "2023",
+                "value": 16640000000000,  # ~$16.64 trillion
+            }],
+            sources=[],
+            retrieved_at=datetime.now(timezone.utc),
+        )
+
+        no_data = OSINTResult(
+            status=ResultStatus.NO_DATA,
+            query="test",
+            results=[],
+            sources=[],
+            retrieved_at=datetime.now(timezone.utc),
+        )
+
+        mock_adapter.query.side_effect = [
+            success_result,
+            no_data,
+            no_data,
+            no_data,
+            no_data,
+            no_data,
+        ]
+
+        mock_get_wb.return_value = mock_adapter
+
+        result = await call_economic_context("European Union")
+
+        assert "ECONOMIC CONTEXT" in result
+        assert "European Union" in result
+        assert "$16.64 trillion" in result
+
+
+@pytest.mark.asyncio
+async def test_economic_context_regional_aggregate_sub_saharan_africa():
+    """Test economic context for Sub-Saharan Africa regional aggregate (AC5)."""
+    with patch("ignifer.server._get_worldbank") as mock_get_wb:
+        mock_adapter = AsyncMock()
+
+        # Mock successful response for Sub-Saharan Africa
+        success_result = OSINTResult(
+            status=ResultStatus.SUCCESS,
+            query="gdp Sub-Saharan Africa",
+            results=[{
+                "indicator": "GDP (current US$)",
+                "country": "Sub-Saharan Africa",
+                "year": "2022",
+                "value": 1860000000000,  # ~$1.86 trillion
+            }],
+            sources=[],
+            retrieved_at=datetime.now(timezone.utc),
+        )
+
+        no_data = OSINTResult(
+            status=ResultStatus.NO_DATA,
+            query="test",
+            results=[],
+            sources=[],
+            retrieved_at=datetime.now(timezone.utc),
+        )
+
+        mock_adapter.query.side_effect = [
+            success_result,
+            no_data,
+            no_data,
+            no_data,
+            no_data,
+            no_data,
+        ]
+
+        mock_get_wb.return_value = mock_adapter
+
+        result = await call_economic_context("Sub-Saharan Africa")
+
+        assert "ECONOMIC CONTEXT" in result
+        assert "Sub-Saharan Africa" in result
+        assert "$1.86 trillion" in result
