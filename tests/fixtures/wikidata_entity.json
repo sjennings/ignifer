@@ -1,0 +1,134 @@
+{
+  "entities": {
+    "Q7747": {
+      "type": "item",
+      "id": "Q7747",
+      "labels": {
+        "en": {
+          "language": "en",
+          "value": "Vladimir Putin"
+        },
+        "ru": {
+          "language": "ru",
+          "value": "\u0412\u043b\u0430\u0434\u0438\u043c\u0438\u0440 \u041f\u0443\u0442\u0438\u043d"
+        }
+      },
+      "descriptions": {
+        "en": {
+          "language": "en",
+          "value": "President of Russia"
+        }
+      },
+      "aliases": {
+        "en": [
+          {
+            "language": "en",
+            "value": "Putin"
+          },
+          {
+            "language": "en",
+            "value": "V. Putin"
+          }
+        ],
+        "ru": [
+          {
+            "language": "ru",
+            "value": "\u041f\u0443\u0442\u0438\u043d"
+          }
+        ]
+      },
+      "claims": {
+        "P31": [
+          {
+            "mainsnak": {
+              "snaktype": "value",
+              "property": "P31",
+              "datavalue": {
+                "value": {
+                  "entity-type": "item",
+                  "numeric-id": 5,
+                  "id": "Q5"
+                },
+                "type": "wikibase-entityid"
+              }
+            },
+            "type": "statement",
+            "rank": "normal"
+          }
+        ],
+        "P27": [
+          {
+            "mainsnak": {
+              "snaktype": "value",
+              "property": "P27",
+              "datavalue": {
+                "value": {
+                  "entity-type": "item",
+                  "numeric-id": 159,
+                  "id": "Q159"
+                },
+                "type": "wikibase-entityid"
+              }
+            },
+            "type": "statement",
+            "rank": "normal"
+          }
+        ],
+        "P106": [
+          {
+            "mainsnak": {
+              "snaktype": "value",
+              "property": "P106",
+              "datavalue": {
+                "value": {
+                  "entity-type": "item",
+                  "numeric-id": 82955,
+                  "id": "Q82955"
+                },
+                "type": "wikibase-entityid"
+              }
+            },
+            "type": "statement",
+            "rank": "normal"
+          }
+        ],
+        "P856": [
+          {
+            "mainsnak": {
+              "snaktype": "value",
+              "property": "P856",
+              "datavalue": {
+                "value": "http://kremlin.ru/",
+                "type": "string"
+              }
+            },
+            "type": "statement",
+            "rank": "normal"
+          }
+        ],
+        "P571": [
+          {
+            "mainsnak": {
+              "snaktype": "value",
+              "property": "P571",
+              "datavalue": {
+                "value": {
+                  "time": "+1952-10-07T00:00:00Z",
+                  "timezone": 0,
+                  "before": 0,
+                  "after": 0,
+                  "precision": 11,
+                  "calendarmodel": "http://www.wikidata.org/entity/Q1985727"
+                },
+                "type": "time"
+              }
+            },
+            "type": "statement",
+            "rank": "normal"
+          }
+        ]
+      }
+    }
+  },
+  "success": 1
+}

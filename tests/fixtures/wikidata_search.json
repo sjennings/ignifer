@@ -1,0 +1,32 @@
+{
+  "searchinfo": {
+    "search": "Vladimir Putin"
+  },
+  "search": [
+    {
+      "id": "Q7747",
+      "title": "Q7747",
+      "pageid": 7896,
+      "label": "Vladimir Putin",
+      "description": "President of Russia",
+      "match": {
+        "type": "label",
+        "language": "en",
+        "text": "Vladimir Putin"
+      }
+    },
+    {
+      "id": "Q57398014",
+      "title": "Q57398014",
+      "pageid": 57123456,
+      "label": "Vladimir Putin",
+      "description": "Wikimedia disambiguation page",
+      "match": {
+        "type": "label",
+        "language": "en",
+        "text": "Vladimir Putin"
+      }
+    }
+  ],
+  "success": 1
+}

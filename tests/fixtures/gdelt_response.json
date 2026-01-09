@@ -1,0 +1,20 @@
+{
+  "articles": [
+    {
+      "url": "https://example.com/article1",
+      "title": "Ukraine Update: Latest Developments",
+      "seendate": "20260108T120000Z",
+      "domain": "example.com",
+      "language": "English",
+      "sourcecountry": "United States"
+    },
+    {
+      "url": "https://example.com/article2",
+      "title": "Analysis: Ukraine Situation",
+      "seendate": "20260108T110000Z",
+      "domain": "example.com",
+      "language": "English",
+      "sourcecountry": "United Kingdom"
+    }
+  ]
+}

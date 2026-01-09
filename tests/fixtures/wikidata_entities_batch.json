@@ -1,0 +1,86 @@
+{
+  "entities": {
+    "Q7747": {
+      "type": "item",
+      "id": "Q7747",
+      "labels": {
+        "en": {
+          "language": "en",
+          "value": "Vladimir Putin"
+        }
+      },
+      "descriptions": {
+        "en": {
+          "language": "en",
+          "value": "President of Russia"
+        }
+      },
+      "aliases": {
+        "en": [
+          {
+            "language": "en",
+            "value": "Putin"
+          }
+        ]
+      },
+      "claims": {
+        "P31": [
+          {
+            "mainsnak": {
+              "snaktype": "value",
+              "property": "P31",
+              "datavalue": {
+                "value": {
+                  "entity-type": "item",
+                  "numeric-id": 5,
+                  "id": "Q5"
+                },
+                "type": "wikibase-entityid"
+              }
+            },
+            "type": "statement",
+            "rank": "normal"
+          }
+        ]
+      }
+    },
+    "Q57398014": {
+      "type": "item",
+      "id": "Q57398014",
+      "labels": {
+        "en": {
+          "language": "en",
+          "value": "Vladimir Putin"
+        }
+      },
+      "descriptions": {
+        "en": {
+          "language": "en",
+          "value": "Wikimedia disambiguation page"
+        }
+      },
+      "aliases": {},
+      "claims": {
+        "P31": [
+          {
+            "mainsnak": {
+              "snaktype": "value",
+              "property": "P31",
+              "datavalue": {
+                "value": {
+                  "entity-type": "item",
+                  "numeric-id": 4167410,
+                  "id": "Q4167410"
+                },
+                "type": "wikibase-entityid"
+              }
+            },
+            "type": "statement",
+            "rank": "normal"
+          }
+        ]
+      }
+    }
+  },
+  "success": 1
+}
