@@ -1,0 +1,35 @@
+{
+  "MessageType": "PositionReport",
+  "Message": {
+    "PositionReport": {
+      "MessageID": 1,
+      "RepeatIndicator": 0,
+      "UserID": 123456789,
+      "Valid": true,
+      "NavigationalStatus": 0,
+      "RateOfTurn": 0,
+      "Sog": 12.5,
+      "PositionAccuracy": true,
+      "Longitude": -122.4194,
+      "Latitude": 37.7749,
+      "Cog": 225.0,
+      "TrueHeading": 223,
+      "Timestamp": 45,
+      "SpecialManoeuvreIndicator": 0,
+      "Spare": 0,
+      "Raim": true,
+      "CommunicationStateIsItdma": false,
+      "CommunicationState": 49196,
+      "Type": 70
+    }
+  },
+  "MetaData": {
+    "MMSI": 123456789,
+    "IMO": 9876543,
+    "ShipName": "EVER GIVEN",
+    "Destination": "LONG BEACH",
+    "ETA": "04-15 12:00",
+    "time_utc": "2024-01-15T10:30:45Z",
+    "country": "Panama"
+  }
+}
