@@ -1,0 +1,687 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Context file for Story 6.4: Sanctions Check Tool
+  Generated: 2026-01-09
+
+  This file provides implementation context for the dev agent.
+  Contains patterns, code samples, and architectural guidance.
+-->
+<context>
+  <story>
+    <id>6.4</id>
+    <key>6-4-sanctions-check-tool</key>
+    <title>Sanctions Check Tool</title>
+    <type>tool</type>
+    <description>
+      Create an MCP tool that screens any entity (person, company, vessel) against
+      global sanctions lists and PEP databases using the OpenSanctionsAdapter.
+    </description>
+  </story>
+
+  <dependencies>
+    <dependency status="done">
+      <story>6.2</story>
+      <name>OpenSanctions Adapter</name>
+      <provides>OpenSanctionsAdapter with search_entity() and check_sanctions() methods</provides>
+    </dependency>
+    <dependency status="optional">
+      <story>3.2</story>
+      <name>Entity Resolution Module</name>
+      <provides>Enhanced name matching via Wikidata Q-ID (optional enhancement)</provides>
+    </dependency>
+  </dependencies>
+
+  <files_to_modify>
+    <file action="modify">
+      <path>src/ignifer/server.py</path>
+      <changes>
+        - Add import for OpenSanctionsAdapter
+        - Add _opensanctions global and _get_opensanctions() accessor
+        - Add _opensanctions to cleanup in _cleanup_resources()
+        - Add sanctions_check tool with @mcp.tool() decorator
+        - Add output formatting helper functions
+      </changes>
+    </file>
+    <file action="create">
+      <path>tests/test_sanctions_check.py</path>
+      <description>Tool-level tests for sanctions_check</description>
+    </file>
+  </files_to_modify>
+
+  <architecture>
+    <pattern name="tool-registration">
+      <description>MCP tool registration using FastMCP decorator</description>
+      <code_sample><![CDATA[
+from fastmcp import FastMCP
+
+mcp = FastMCP("ignifer")
+
+@mcp.tool()
+async def sanctions_check(entity: str) -> str:
+    """
+    Screen any entity against global sanctions lists.
+
+    Args:
+        entity: Entity name to screen (person, company, vessel, etc.)
+                Examples: "Rosneft", "Alisher Usmanov", "Akademik Cherskiy"
+
+    Returns:
+        Formatted sanctions screening results with match status,
+        sanctions lists, PEP status, and associated entities
+    """
+    # Implementation
+]]></code_sample>
+    </pattern>
+
+    <pattern name="adapter-accessor">
+      <description>Lazy initialization accessor pattern for adapters</description>
+      <code_sample><![CDATA[
+# Add to global instances section
+_opensanctions: OpenSanctionsAdapter | None = None
+
+def _get_opensanctions() -> OpenSanctionsAdapter:
+    global _opensanctions
+    if _opensanctions is None:
+        _opensanctions = OpenSanctionsAdapter(cache=_get_cache())
+    return _opensanctions
+]]></code_sample>
+    </pattern>
+
+    <pattern name="cleanup-registration">
+      <description>Register adapter for cleanup in _cleanup_resources()</description>
+      <code_sample><![CDATA[
+async def _cleanup_resources() -> None:
+    global _adapter, _worldbank, _wikidata, _opensky, _aisstream, _acled, _opensanctions, _entity_resolver, _cache
+
+    # Clear entity resolver first (it references wikidata adapter)
+    _entity_resolver = None
+
+    # Close adapters first, then cache
+    adapters = [
+        (_adapter, "_adapter"),
+        (_worldbank, "_worldbank"),
+        (_wikidata, "_wikidata"),
+        (_opensky, "_opensky"),
+        (_aisstream, "_aisstream"),
+        (_acled, "_acled"),
+        (_opensanctions, "_opensanctions"),  # Add this
+    ]
+    # ... rest of cleanup
+]]></code_sample>
+    </pattern>
+
+    <pattern name="import-pattern">
+      <description>Import OpenSanctionsAdapter from adapters package</description>
+      <code_sample><![CDATA[
+from ignifer.adapters import (
+    ACLEDAdapter,
+    AdapterAuthError,
+    AdapterError,
+    AdapterTimeoutError,
+    AISStreamAdapter,
+    GDELTAdapter,
+    OpenSanctionsAdapter,  # Add this import
+    OpenSkyAdapter,
+    WikidataAdapter,
+    WorldBankAdapter,
+)
+]]></code_sample>
+    </pattern>
+  </architecture>
+
+  <opensanctions_adapter>
+    <description>
+      The OpenSanctionsAdapter is already implemented in Story 6.2.
+      It provides sanctions and PEP screening via the OpenSanctions API.
+    </description>
+
+    <properties>
+      <property name="source_name">"opensanctions"</property>
+      <property name="base_quality_tier">QualityTier.HIGH</property>
+      <property name="DEFAULT_TIMEOUT">15.0 seconds</property>
+      <property name="MAX_RESULTS">10</property>
+    </properties>
+
+    <method name="search_entity">
+      <signature>async def search_entity(name: str) -> OSINTResult</signature>
+      <description>Search for entity by name using match API. Primary method for screening.</description>
+      <returns>OSINTResult with matching entities normalized to flat dicts</returns>
+    </method>
+
+    <method name="check_sanctions">
+      <signature>async def check_sanctions(entity_id: str) -> OSINTResult</signature>
+      <description>Look up entity by OpenSanctions ID for precise matching.</description>
+    </method>
+
+    <result_structure>
+      <description>Each result in OSINTResult.results is a normalized flat dict:</description>
+      <code_sample><![CDATA[
+{
+    "entity_id": "NK-XXXXX",
+    "caption": "Rosneft Oil Company",
+    "schema": "Company",  # Person, Company, Vessel, etc.
+    "name": "Rosneft Oil Company, PAO Rosneft",
+    "aliases": "Rosneft, Rosneft Oil",
+    "birth_date": None,  # For persons
+    "nationality": "ru",
+    "position": "Oil company",  # For persons: job title
+    "sanctions_lists": "us_ofac_sdn, eu_fsf, gb_hmt_sanctions, ch_seco_sanctions",
+    "sanctions_count": 4,
+    "is_sanctioned": True,
+    "is_pep": False,
+    "is_poi": False,
+    "first_seen": "2014-07-16",
+    "last_seen": "2024-01-15",
+    "referents": "ofac-12345, eu-67890",
+    "referents_count": 2,
+    "url": "https://www.opensanctions.org/entities/NK-XXXXX",
+    "match_score": 0.98,
+    "match_confidence": "VERY_LIKELY",
+    # For PEP-only entities (FR19):
+    "pep_status": "PEP - NOT CURRENTLY SANCTIONED",
+    "due_diligence_note": "Enhanced due diligence recommended for PEPs"
+}
+]]></code_sample>
+    </result_structure>
+
+    <confidence_mapping>
+      <level score=">=0.9" confidence="VERY_LIKELY" display="HIGH" status="MATCH"/>
+      <level score=">=0.7" confidence="LIKELY" display="MEDIUM" status="MATCH"/>
+      <level score=">=0.5" confidence="EVEN_CHANCE" display="LOW" status="PARTIAL MATCH"/>
+      <level score="&lt;0.5" confidence="UNLIKELY" display="VERY LOW" note="Flag for verification"/>
+    </confidence_mapping>
+  </opensanctions_adapter>
+
+  <error_handling>
+    <description>Follow hybrid error handling pattern from project-context.md</description>
+    <imports><![CDATA[
+from ignifer.adapters.base import AdapterError, AdapterTimeoutError, AdapterParseError
+from ignifer.models import ResultStatus
+]]></imports>
+
+    <pattern name="tool-error-handling">
+      <code_sample><![CDATA[
+async def sanctions_check(entity: str) -> str:
+    # Input validation
+    if not entity or not entity.strip():
+        return (
+            "## Invalid Entity\n\n"
+            "Please provide an entity name to screen.\n\n"
+            "**Examples:**\n"
+            "- Company: Rosneft, Gazprom, Huawei\n"
+            "- Person: Viktor Vekselberg, Alisher Usmanov\n"
+            "- Vessel: Akademik Cherskiy"
+        )
+
+    try:
+        adapter = _get_opensanctions()
+        result = await adapter.search_entity(entity.strip())
+
+        if result.status == ResultStatus.NO_DATA:
+            return _format_no_match_message(entity, result)
+
+        if result.status == ResultStatus.RATE_LIMITED:
+            return (
+                "## Rate Limited\n\n"
+                "OpenSanctions API rate limit reached. Please try again later."
+            )
+
+        return _format_sanctions_result(result, entity)
+
+    except AdapterTimeoutError:
+        return (
+            f"## Request Timed Out\n\n"
+            f"OpenSanctions API timed out while screening **{entity}**.\n\n"
+            f"Please try again."
+        )
+    except AdapterParseError as e:
+        logger.error(f"OpenSanctions parse error: {e}")
+        return (
+            f"## Data Error\n\n"
+            f"Unable to parse sanctions data for **{entity}**.\n\n"
+            f"Please try again later."
+        )
+    except AdapterError as e:
+        logger.error(f"OpenSanctions adapter error: {e}")
+        return (
+            f"## Service Error\n\n"
+            f"Unable to screen **{entity}** against sanctions lists.\n\n"
+            f"Please try again later."
+        )
+    except Exception as e:
+        logger.exception(f"Unexpected error screening {entity}: {e}")
+        return (
+            f"## Error\n\n"
+            f"An unexpected error occurred while screening **{entity}**.\n\n"
+            f"Please try again later."
+        )
+]]></code_sample>
+    </pattern>
+  </error_handling>
+
+  <output_formatting>
+    <description>
+      Format sanctions screening results in a clear, structured format.
+      Follow patterns from conflict_analysis tool.
+    </description>
+
+    <format_match>
+      <code_sample><![CDATA[
+SANCTIONS SCREENING: Rosneft
+===============================================================
+
+MATCH RESULT: MATCH
+Confidence: 98% (HIGH)
+
+ENTITY INFORMATION
+------------------
+Type: Company
+Full Name: Rosneft Oil Company
+Aliases: Rosneft, PAO Rosneft
+
+SANCTIONS STATUS
+----------------
+Currently Sanctioned: YES
+Sanctions Lists:
+  - US OFAC SDN (Specially Designated Nationals)
+  - EU Financial Sanctions
+  - UK HMT (His Majesty's Treasury)
+  - Swiss SECO
+
+First Sanctioned: 2014-07-16
+Last Updated: 2024-01-15
+
+CROSS-REFERENCES
+----------------
+OpenSanctions: https://www.opensanctions.org/entities/NK-XXXXX
+
+---------------------------------------------------------------
+Sources: OpenSanctions (https://www.opensanctions.org/)
+Data retrieved: 2026-01-09T14:30:00+00:00
+===============================================================
+]]></code_sample>
+    </format_match>
+
+    <format_pep_only>
+      <description>For PEP-only entities (FR19 compliance)</description>
+      <code_sample><![CDATA[
+SANCTIONS SCREENING: John Smith
+===============================================================
+
+MATCH RESULT: PEP (NOT SANCTIONED)
+Confidence: 85% (MEDIUM)
+
+ENTITY INFORMATION
+------------------
+Type: Person
+Full Name: John Smith
+Position: Minister of Finance
+
+PEP STATUS
+----------
+Politically Exposed Person: YES
+Currently Sanctioned: NO
+
+NOTE: Enhanced due diligence recommended for Politically Exposed
+Persons even when not currently sanctioned.
+
+---------------------------------------------------------------
+Sources: OpenSanctions (https://www.opensanctions.org/)
+Data retrieved: 2026-01-09T14:30:00+00:00
+===============================================================
+]]></code_sample>
+    </format_pep_only>
+
+    <format_no_match>
+      <code_sample><![CDATA[
+SANCTIONS SCREENING: Example Corp
+===============================================================
+
+MATCH RESULT: NO MATCH
+Confidence: Comprehensive search completed
+
+SCREENING SUMMARY
+-----------------
+No matches found in global sanctions databases.
+
+Databases Searched:
+  - US OFAC SDN
+  - EU Financial Sanctions
+  - UN Security Council Sanctions
+  - UK HMT Sanctions
+  - Swiss SECO Sanctions
+  - Various national PEP databases
+
+NOTE: Entity may use aliases not in database. Consider:
+  - Verifying exact legal name
+  - Checking alternative spellings or transliterations
+  - Searching for parent/subsidiary companies
+
+---------------------------------------------------------------
+Sources: OpenSanctions (https://www.opensanctions.org/)
+Data retrieved: 2026-01-09T14:30:00+00:00
+===============================================================
+]]></code_sample>
+    </format_no_match>
+
+    <format_partial_match>
+      <code_sample><![CDATA[
+SANCTIONS SCREENING: Rosneft Corp
+===============================================================
+
+MATCH RESULT: PARTIAL MATCH
+Confidence: 55% (LOW)
+
+POTENTIAL MATCH
+---------------
+Name: Rosneft Oil Company (PAO Rosneft)
+Type: Company
+Match confidence is below threshold for positive identification.
+
+VERIFICATION RECOMMENDED
+------------------------
+The matched entity may be:
+  - A different entity with a similar name
+  - The same entity under a different legal name
+  - A subsidiary or related company
+
+Suggested Actions:
+  - Verify using official registration documents
+  - Search with full legal entity name
+  - Check parent company if applicable
+
+---------------------------------------------------------------
+Sources: OpenSanctions (https://www.opensanctions.org/)
+Data retrieved: 2026-01-09T14:30:00+00:00
+===============================================================
+]]></code_sample>
+    </format_partial_match>
+
+    <sanctions_list_expansion>
+      <description>Expand common sanctions list abbreviations for clarity</description>
+      <mapping>
+        <item code="us_ofac_sdn" display="US OFAC SDN (Specially Designated Nationals)"/>
+        <item code="eu_fsf" display="EU Financial Sanctions"/>
+        <item code="un_sc_sanctions" display="UN Security Council Sanctions"/>
+        <item code="gb_hmt_sanctions" display="UK HMT (His Majesty's Treasury)"/>
+        <item code="ch_seco_sanctions" display="Swiss SECO"/>
+        <item code="ua_nsdc" display="Ukraine NSDC Sanctions"/>
+        <item code="au_dfat" display="Australia DFAT Sanctions"/>
+        <item code="ca_sema" display="Canada SEMA Sanctions"/>
+        <item code="jp_mof" display="Japan MOF Sanctions"/>
+      </mapping>
+    </sanctions_list_expansion>
+  </output_formatting>
+
+  <helper_functions>
+    <function name="_format_sanctions_result">
+      <description>Main formatter for successful sanctions check results</description>
+      <logic>
+        1. Extract first result from OSINTResult.results
+        2. Determine match status (MATCH, PARTIAL MATCH, PEP, NO MATCH)
+        3. Format confidence display based on match_score
+        4. Build entity information section
+        5. Build sanctions status section (if sanctioned)
+        6. Build PEP status section (if PEP - FR19)
+        7. Build associated entities section (if available)
+        8. Add cross-references (OpenSanctions URL)
+        9. Add footer with source attribution and timestamp
+      </logic>
+    </function>
+
+    <function name="_format_no_match_message">
+      <description>Format message when no sanctions match found</description>
+      <logic>
+        1. Show NO MATCH status
+        2. List databases that were searched
+        3. Provide suggestions for verification
+        4. Include source attribution
+      </logic>
+    </function>
+
+    <function name="_format_match_status">
+      <description>Determine and format match status string</description>
+      <logic>
+        - If is_sanctioned: "MATCH"
+        - If is_pep and not is_sanctioned: "PEP (NOT SANCTIONED)"
+        - If match_score >= 0.5 and not sanctioned/pep: "PARTIAL MATCH"
+        - Otherwise: "NO MATCH"
+      </logic>
+    </function>
+
+    <function name="_format_confidence_display">
+      <description>Format confidence for display</description>
+      <code_sample><![CDATA[
+def _format_confidence_display(score: float) -> str:
+    """Format match score as percentage with level."""
+    pct = int(score * 100)
+    if score >= 0.9:
+        level = "HIGH"
+    elif score >= 0.7:
+        level = "MEDIUM"
+    elif score >= 0.5:
+        level = "LOW"
+    else:
+        level = "VERY LOW"
+    return f"{pct}% ({level})"
+]]></code_sample>
+    </function>
+
+    <function name="_expand_sanctions_list">
+      <description>Expand sanctions list code to human-readable name</description>
+      <code_sample><![CDATA[
+SANCTIONS_LIST_NAMES = {
+    "us_ofac_sdn": "US OFAC SDN (Specially Designated Nationals)",
+    "eu_fsf": "EU Financial Sanctions",
+    "un_sc_sanctions": "UN Security Council Sanctions",
+    "gb_hmt_sanctions": "UK HMT (His Majesty's Treasury)",
+    "ch_seco_sanctions": "Swiss SECO",
+    "ua_nsdc": "Ukraine NSDC Sanctions",
+    "au_dfat": "Australia DFAT Sanctions",
+    "ca_sema": "Canada SEMA Sanctions",
+    "jp_mof": "Japan MOF Sanctions",
+}
+
+def _expand_sanctions_list(code: str) -> str:
+    """Expand sanctions list code to readable name."""
+    return SANCTIONS_LIST_NAMES.get(code, code.replace("_", " ").title())
+]]></code_sample>
+    </function>
+  </helper_functions>
+
+  <testing>
+    <description>Test patterns following test_conflict_analysis.py</description>
+
+    <mock_result_factory>
+      <code_sample><![CDATA[
+from datetime import datetime, timezone
+from unittest.mock import AsyncMock, patch
+
+import pytest
+
+from ignifer.adapters.base import AdapterTimeoutError
+from ignifer.models import (
+    ConfidenceLevel,
+    OSINTResult,
+    QualityTier,
+    ResultStatus,
+    SourceAttribution,
+    SourceMetadata,
+)
+from ignifer.server import sanctions_check
+
+
+def _create_mock_sanctions_result(
+    entity_name: str = "Rosneft",
+    is_sanctioned: bool = True,
+    is_pep: bool = False,
+    match_score: float = 0.98,
+    schema: str = "Company",
+    sanctions_lists: str = "us_ofac_sdn, eu_fsf",
+) -> OSINTResult:
+    """Create a mock OpenSanctions result for testing."""
+    result_data: dict[str, str | int | float | bool | None] = {
+        "entity_id": "NK-12345",
+        "caption": entity_name,
+        "schema": schema,
+        "name": entity_name,
+        "aliases": f"{entity_name} Corp",
+        "birth_date": None,
+        "nationality": "ru",
+        "position": None,
+        "sanctions_lists": sanctions_lists,
+        "sanctions_count": len(sanctions_lists.split(", ")),
+        "is_sanctioned": is_sanctioned,
+        "is_pep": is_pep,
+        "is_poi": False,
+        "first_seen": "2014-07-16",
+        "last_seen": "2024-01-15",
+        "referents": None,
+        "referents_count": 0,
+        "url": "https://www.opensanctions.org/entities/NK-12345",
+        "match_score": match_score,
+        "match_confidence": "VERY_LIKELY" if match_score >= 0.9 else "LIKELY",
+    }
+
+    if is_pep and not is_sanctioned:
+        result_data["pep_status"] = "PEP - NOT CURRENTLY SANCTIONED"
+        result_data["due_diligence_note"] = "Enhanced due diligence recommended for PEPs"
+
+    return OSINTResult(
+        status=ResultStatus.SUCCESS,
+        query=entity_name,
+        results=[result_data],
+        sources=[
+            SourceAttribution(
+                source="opensanctions",
+                quality=QualityTier.HIGH,
+                confidence=ConfidenceLevel.VERY_LIKELY,
+                metadata=SourceMetadata(
+                    source_name="opensanctions",
+                    source_url="https://api.opensanctions.org/match/default",
+                    retrieved_at=datetime.now(timezone.utc),
+                ),
+            )
+        ],
+        retrieved_at=datetime.now(timezone.utc),
+    )
+]]></code_sample>
+    </mock_result_factory>
+
+    <test_pattern>
+      <code_sample><![CDATA[
+class TestSanctionsCheckTool:
+    @pytest.mark.asyncio
+    async def test_sanctions_check_success(self) -> None:
+        """Sanctions check returns formatted output on success."""
+        mock_result = _create_mock_sanctions_result()
+
+        with patch("ignifer.server._get_opensanctions") as mock_adapter:
+            adapter_instance = AsyncMock()
+            adapter_instance.search_entity.return_value = mock_result
+            mock_adapter.return_value = adapter_instance
+
+            result = await sanctions_check.fn("Rosneft")
+
+            assert "SANCTIONS SCREENING" in result
+            assert "ROSNEFT" in result.upper()
+            assert "MATCH" in result
+
+    @pytest.mark.asyncio
+    async def test_sanctions_check_pep_only(self) -> None:
+        """PEP-only entity shows appropriate status (FR19)."""
+        mock_result = _create_mock_sanctions_result(
+            entity_name="John Smith",
+            is_sanctioned=False,
+            is_pep=True,
+            schema="Person",
+            sanctions_lists="",
+        )
+
+        with patch("ignifer.server._get_opensanctions") as mock_adapter:
+            adapter_instance = AsyncMock()
+            adapter_instance.search_entity.return_value = mock_result
+            mock_adapter.return_value = adapter_instance
+
+            result = await sanctions_check.fn("John Smith")
+
+            assert "PEP" in result
+            assert "NOT SANCTIONED" in result or "not sanctioned" in result.lower()
+            assert "due diligence" in result.lower()
+
+    @pytest.mark.asyncio
+    async def test_sanctions_check_empty_input(self) -> None:
+        """Empty entity returns validation error."""
+        result = await sanctions_check.fn("")
+        assert "provide" in result.lower() or "entity" in result.lower()
+
+    @pytest.mark.asyncio
+    async def test_sanctions_check_timeout(self) -> None:
+        """Timeout returns user-friendly message."""
+        with patch("ignifer.server._get_opensanctions") as mock_adapter:
+            adapter_instance = AsyncMock()
+            adapter_instance.search_entity.side_effect = AdapterTimeoutError(
+                "opensanctions", 15.0
+            )
+            mock_adapter.return_value = adapter_instance
+
+            result = await sanctions_check.fn("Rosneft")
+
+            assert "Timed Out" in result or "timeout" in result.lower()
+]]></code_sample>
+    </test_pattern>
+
+    <required_tests>
+      <test name="test_sanctions_check_success">Returns formatted screening for sanctioned entity</test>
+      <test name="test_sanctions_check_company">Company screening returns correct format</test>
+      <test name="test_sanctions_check_person">Person screening returns correct format</test>
+      <test name="test_sanctions_check_vessel">Vessel screening works with owner/operator info</test>
+      <test name="test_sanctions_check_high_confidence">High match score displays correctly</test>
+      <test name="test_sanctions_check_medium_confidence">Medium match score displays correctly</test>
+      <test name="test_sanctions_check_partial_match">Low confidence shows PARTIAL MATCH</test>
+      <test name="test_sanctions_check_pep_only">PEP without sanctions returns appropriate status (FR19)</test>
+      <test name="test_sanctions_check_pep_includes_due_diligence">PEP result includes due diligence note</test>
+      <test name="test_sanctions_check_multiple_sanctions_lists">Multiple lists displayed correctly</test>
+      <test name="test_sanctions_check_no_match">No match returns appropriate message</test>
+      <test name="test_sanctions_check_no_match_suggestions">No match includes verification suggestions</test>
+      <test name="test_sanctions_check_includes_associated_entities">Associated entities shown (if available)</test>
+      <test name="test_sanctions_check_includes_aliases">Alias matches displayed</test>
+      <test name="test_sanctions_check_rate_limited">Handles rate limiting gracefully</test>
+      <test name="test_sanctions_check_timeout">Handles timeout gracefully</test>
+      <test name="test_sanctions_check_source_attribution">Includes OpenSanctions source info</test>
+      <test name="test_sanctions_check_empty_input">Empty entity returns validation error</test>
+      <test name="test_sanctions_check_whitespace_input">Whitespace-only returns validation error</test>
+      <test name="test_sanctions_check_includes_timestamps">First seen and last seen dates included</test>
+    </required_tests>
+
+    <coverage_target>80% minimum on sanctions check tool code</coverage_target>
+  </testing>
+
+  <project_rules>
+    <rule priority="critical">snake_case for all JSON fields - no exceptions</rule>
+    <rule priority="critical">datetime.now(timezone.utc) - never naive datetime</rule>
+    <rule priority="critical">stdlib logging only - no loguru, no structlog</rule>
+    <rule priority="critical">ISO 8601 + timezone for all datetime serialization</rule>
+    <rule priority="high">Layer rule: Tools in server.py, adapters in adapters/ - never mix</rule>
+    <rule priority="high">Adapter-owned httpx clients - never shared across adapters</rule>
+    <rule priority="high">Hybrid error handling - exceptions for unexpected, Result type for expected</rule>
+    <rule priority="medium">Type hints required on all public functions</rule>
+    <rule priority="medium">Test naming: test_{action}_{scenario}_{expected}</rule>
+  </project_rules>
+
+  <implementation_checklist>
+    <task status="pending">Add OpenSanctionsAdapter import to server.py</task>
+    <task status="pending">Add _opensanctions global variable</task>
+    <task status="pending">Add _get_opensanctions() accessor function</task>
+    <task status="pending">Add _opensanctions to _cleanup_resources()</task>
+    <task status="pending">Implement _format_sanctions_result() helper</task>
+    <task status="pending">Implement _format_no_match_message() helper</task>
+    <task status="pending">Implement _format_confidence_display() helper</task>
+    <task status="pending">Implement _expand_sanctions_list() helper</task>
+    <task status="pending">Implement sanctions_check tool with @mcp.tool() decorator</task>
+    <task status="pending">Create tests/test_sanctions_check.py with all required tests</task>
+    <task status="pending">Run tests and verify 80%+ coverage</task>
+    <task status="pending">Run ruff format and ruff check</task>
+    <task status="pending">Run mypy type checking</task>
+  </implementation_checklist>
+</context>

@@ -74,6 +74,9 @@ development_status:
   # Story 6.3: Conflict Analysis Tool
   6-3-conflict-analysis-tool: done
 
+  # Story 6.4: Sanctions Check Tool
+  6-4-sanctions-check-tool: done
+
   # Epic 7: Multi-Source Correlation
   epic-7: backlog
 
