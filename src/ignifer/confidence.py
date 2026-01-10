@@ -156,8 +156,7 @@ class ConfidenceCalculator:
             )
 
         # Weakest link: use lowest quality tier
-        tier_order = {QualityTier.HIGH: 0, QualityTier.MEDIUM: 1, QualityTier.LOW: 2}
-        weakest_tier = max(quality_tiers, key=lambda t: tier_order.get(t, 2))
+        weakest_tier = max(quality_tiers, key=lambda t: t.ordering)
         base_confidence = self.QUALITY_BASE.get(weakest_tier, 0.4)
         key_factors.append(
             f"Base confidence from {weakest_tier.name} quality source: {base_confidence:.0%}"
@@ -238,20 +237,7 @@ class ConfidenceCalculator:
         Returns:
             ConfidenceLevel corresponding to the percentage.
         """
-        if percentage >= 0.95:
-            return ConfidenceLevel.ALMOST_CERTAIN
-        elif percentage >= 0.80:
-            return ConfidenceLevel.VERY_LIKELY
-        elif percentage >= 0.55:
-            return ConfidenceLevel.LIKELY
-        elif percentage >= 0.45:
-            return ConfidenceLevel.ROUGHLY_EVEN
-        elif percentage >= 0.20:
-            return ConfidenceLevel.UNLIKELY
-        elif percentage >= 0.05:
-            return ConfidenceLevel.VERY_UNLIKELY
-        else:
-            return ConfidenceLevel.REMOTE
+        return ConfidenceLevel.from_percentage(percentage)
 
 
 __all__ = [

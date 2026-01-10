@@ -73,6 +73,31 @@ class ConfidenceLevel(Enum):
         }
         return labels[self]
 
+    @classmethod
+    def from_percentage(cls, percentage: float) -> "ConfidenceLevel":
+        """Map percentage (0.0-1.0) to appropriate ConfidenceLevel.
+
+        Args:
+            percentage: Confidence as float between 0.0 and 1.0.
+
+        Returns:
+            ConfidenceLevel corresponding to the percentage.
+        """
+        if percentage >= 0.95:
+            return cls.ALMOST_CERTAIN
+        elif percentage >= 0.80:
+            return cls.VERY_LIKELY
+        elif percentage >= 0.55:
+            return cls.LIKELY
+        elif percentage >= 0.45:
+            return cls.ROUGHLY_EVEN
+        elif percentage >= 0.20:
+            return cls.UNLIKELY
+        elif percentage >= 0.05:
+            return cls.VERY_UNLIKELY
+        else:
+            return cls.REMOTE
+
 
 class QualityTier(Enum):
     """Source quality tier classification."""
@@ -80,6 +105,15 @@ class QualityTier(Enum):
     HIGH = "H"  # Official sources, academic research
     MEDIUM = "M"  # Reputable news, verified OSINT
     LOW = "L"  # Social media, unverified reports
+
+    @property
+    def ordering(self) -> int:
+        """Numeric ordering for comparisons (lower is better quality).
+
+        Returns:
+            0 for HIGH, 1 for MEDIUM, 2 for LOW.
+        """
+        return {QualityTier.HIGH: 0, QualityTier.MEDIUM: 1, QualityTier.LOW: 2}[self]
 
 
 class ResultStatus(Enum):

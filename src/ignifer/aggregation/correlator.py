@@ -110,20 +110,7 @@ class AggregatedResult(BaseModel):
         Returns:
             ConfidenceLevel corresponding to the overall_confidence value.
         """
-        if self.overall_confidence >= 0.95:
-            return ConfidenceLevel.ALMOST_CERTAIN
-        elif self.overall_confidence >= 0.80:
-            return ConfidenceLevel.VERY_LIKELY
-        elif self.overall_confidence >= 0.55:
-            return ConfidenceLevel.LIKELY
-        elif self.overall_confidence >= 0.45:
-            return ConfidenceLevel.ROUGHLY_EVEN
-        elif self.overall_confidence >= 0.20:
-            return ConfidenceLevel.UNLIKELY
-        elif self.overall_confidence >= 0.05:
-            return ConfidenceLevel.VERY_UNLIKELY
-        else:
-            return ConfidenceLevel.REMOTE
+        return ConfidenceLevel.from_percentage(self.overall_confidence)
 
 
 class Correlator:
@@ -437,11 +424,9 @@ class Correlator:
     ) -> str:
         """Get content from the highest quality source."""
         # Sort by quality tier (HIGH > MEDIUM > LOW)
-        tier_order = {QualityTier.HIGH: 0, QualityTier.MEDIUM: 1, QualityTier.LOW: 2}
-
         sorted_findings = sorted(
             source_findings,
-            key=lambda sf: tier_order.get(sf[1].quality_tier, 2),
+            key=lambda sf: sf[1].quality_tier.ordering,
         )
 
         return sorted_findings[0][2] if sorted_findings else ""
@@ -603,10 +588,8 @@ class Correlator:
         quality_b: QualityTier,
     ) -> str | None:
         """Suggest which source is more authoritative based on quality tier."""
-        tier_order = {QualityTier.HIGH: 0, QualityTier.MEDIUM: 1, QualityTier.LOW: 2}
-
-        order_a = tier_order.get(quality_a, 2)
-        order_b = tier_order.get(quality_b, 2)
+        order_a = quality_a.ordering
+        order_b = quality_b.ordering
 
         if order_a < order_b:
             return source_a_name

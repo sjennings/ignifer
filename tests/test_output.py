@@ -165,14 +165,6 @@ class TestOutputFormatter:
         assert "RATE LIMITED" in output or "rate limit" in output.lower()
         assert "RECOMMENDED ACTIONS" in output
 
-    def test_quality_labels(self) -> None:
-        """Quality tiers are labeled correctly."""
-        formatter = OutputFormatter()
-
-        assert "High" in formatter._quality_label(QualityTier.HIGH)
-        assert "Verified" in formatter._quality_label(QualityTier.MEDIUM)
-        assert "Unverified" in formatter._quality_label(QualityTier.LOW)
-
     def test_freshness_indicator_live(self) -> None:
         """Freshness indicator shows 'LIVE' for recent data."""
         formatter = OutputFormatter()

@@ -328,15 +328,6 @@ class OutputFormatter:
         }
         return grade_map.get(tier, "F")
 
-    def _quality_label(self, tier: QualityTier | None) -> str:
-        """Convert QualityTier to human-readable label."""
-        labels = {
-            QualityTier.HIGH: "High reliability",
-            QualityTier.MEDIUM: "Verified news sources",
-            QualityTier.LOW: "Unverified sources",
-        }
-        return labels.get(tier, "Unknown reliability") if tier else "Unknown reliability"
-
     def _assess_coverage_level(self, article_count: int) -> str:
         """Assess coverage level based on article count with IC language."""
         if article_count >= 50:

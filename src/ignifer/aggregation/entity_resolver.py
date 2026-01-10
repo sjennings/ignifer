@@ -73,20 +73,7 @@ class EntityMatch(BaseModel):
         Returns:
             ConfidenceLevel corresponding to the match_confidence value.
         """
-        if self.match_confidence >= 0.95:
-            return ConfidenceLevel.ALMOST_CERTAIN
-        elif self.match_confidence >= 0.80:
-            return ConfidenceLevel.VERY_LIKELY
-        elif self.match_confidence >= 0.55:
-            return ConfidenceLevel.LIKELY
-        elif self.match_confidence >= 0.45:
-            return ConfidenceLevel.ROUGHLY_EVEN
-        elif self.match_confidence >= 0.20:
-            return ConfidenceLevel.UNLIKELY
-        elif self.match_confidence >= 0.05:
-            return ConfidenceLevel.VERY_UNLIKELY
-        else:
-            return ConfidenceLevel.REMOTE
+        return ConfidenceLevel.from_percentage(self.match_confidence)
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to dictionary.
