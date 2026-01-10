@@ -11,9 +11,11 @@ import trafilatura
 from fastmcp import FastMCP
 
 from ignifer.adapters import (
+    AdapterAuthError,
     AdapterError,
     AdapterTimeoutError,
     GDELTAdapter,
+    OpenSkyAdapter,
     WikidataAdapter,
     WorldBankAdapter,
 )
@@ -38,6 +40,7 @@ _cache: CacheManager | None = None
 _adapter: GDELTAdapter | None = None
 _worldbank: WorldBankAdapter | None = None
 _wikidata: WikidataAdapter | None = None
+_opensky: OpenSkyAdapter | None = None
 _entity_resolver: EntityResolver | None = None
 _formatter: OutputFormatter | None = None
 
@@ -70,6 +73,13 @@ def _get_wikidata() -> WikidataAdapter:
     return _wikidata
 
 
+def _get_opensky() -> OpenSkyAdapter:
+    global _opensky
+    if _opensky is None:
+        _opensky = OpenSkyAdapter(cache=_get_cache())
+    return _opensky
+
+
 def _get_entity_resolver() -> EntityResolver:
     global _entity_resolver
     if _entity_resolver is None:
@@ -86,13 +96,18 @@ def _get_formatter() -> OutputFormatter:
 
 async def _cleanup_resources() -> None:
     """Close all open resources (adapters, cache connections)."""
-    global _adapter, _worldbank, _wikidata, _entity_resolver, _cache
+    global _adapter, _worldbank, _wikidata, _opensky, _entity_resolver, _cache
 
     # Clear entity resolver first (it references wikidata adapter)
     _entity_resolver = None
 
     # Close adapters first, then cache (adapters may use cache)
-    adapters = [(_adapter, "_adapter"), (_worldbank, "_worldbank"), (_wikidata, "_wikidata")]
+    adapters = [
+        (_adapter, "_adapter"),
+        (_worldbank, "_worldbank"),
+        (_wikidata, "_wikidata"),
+        (_opensky, "_opensky"),
+    ]
     for adapter, name in adapters:
         if adapter is not None:
             await adapter.close()
@@ -1111,6 +1126,512 @@ async def entity_lookup(name: str = "", identifier: str = "") -> str:
         return (
             f"## Error\n\n"
             f"An unexpected error occurred while looking up **{name or identifier}**.\n\n"
+            f"Please try again later."
+        )
+
+
+# =============================================================================
+# Flight Tracking Tool
+# =============================================================================
+
+
+def _identify_aircraft_identifier(identifier: str) -> tuple[str, str]:
+    """Identify the type of aircraft identifier and normalize it.
+
+    Detects whether the identifier is:
+    - ICAO24: 6 hex characters (e.g., 'abc123', 'A12F4E')
+    - Tail number: N-number (US) or other national registration (e.g., 'N12345', 'G-ABCD')
+    - Callsign: Airline code + flight number (e.g., 'UAL123', 'BAW456')
+
+    Args:
+        identifier: Aircraft identifier string
+
+    Returns:
+        Tuple of (identifier_type, normalized_value) where identifier_type is
+        one of 'icao24', 'tail_number', or 'callsign'
+    """
+    # Normalize: strip whitespace, uppercase
+    normalized = identifier.strip().upper()
+
+    # ICAO24: exactly 6 hex characters
+    if len(normalized) == 6:
+        try:
+            int(normalized, 16)
+            return ("icao24", normalized.lower())
+        except ValueError:
+            pass  # Not hex, continue checking
+
+    # US tail numbers: N followed by digits and optional letters
+    # e.g., N12345, N123AB, N1234A
+    if normalized.startswith("N") and len(normalized) >= 2:
+        rest = normalized[1:]
+        # Check if it looks like a US registration
+        if rest[0].isdigit():
+            return ("tail_number", normalized)
+
+    # Other country tail numbers: letter-dash-letters (e.g., G-ABCD, F-GXYZ)
+    if len(normalized) >= 5 and normalized[1] == "-":
+        return ("tail_number", normalized)
+
+    # Default to callsign
+    return ("callsign", normalized)
+
+
+def _format_heading(heading: float | None) -> str:
+    """Format heading in degrees with cardinal direction.
+
+    Args:
+        heading: Heading in degrees (0-360), or None
+
+    Returns:
+        Formatted string like "045 (Northeast)" or "N/A"
+    """
+    if heading is None:
+        return "N/A"
+
+    # Cardinal directions
+    directions = [
+        (0, "North"),
+        (45, "Northeast"),
+        (90, "East"),
+        (135, "Southeast"),
+        (180, "South"),
+        (225, "Southwest"),
+        (270, "West"),
+        (315, "Northwest"),
+        (360, "North"),
+    ]
+
+    # Find closest direction
+    direction = "North"
+    min_diff: float = 360.0
+    for deg, name in directions:
+        diff = abs(heading - deg)
+        if diff < min_diff:
+            min_diff = diff
+            direction = name
+
+    return f"{heading:03.0f} ({direction})"
+
+
+def _format_altitude(altitude_m: float | None, on_ground: bool | None) -> str:
+    """Format altitude in feet and meters.
+
+    Args:
+        altitude_m: Altitude in meters, or None
+        on_ground: Whether aircraft is on ground
+
+    Returns:
+        Formatted string like "35,000 ft (10,668 m)" or "On Ground"
+    """
+    if on_ground:
+        return "On Ground"
+    if altitude_m is None:
+        return "N/A"
+
+    altitude_ft = altitude_m * 3.28084
+    return f"{altitude_ft:,.0f} ft ({altitude_m:,.0f} m)"
+
+
+def _format_speed(velocity_ms: float | None) -> str:
+    """Format ground speed in knots and km/h.
+
+    Args:
+        velocity_ms: Velocity in m/s, or None
+
+    Returns:
+        Formatted string like "452 kts (837 km/h)" or "N/A"
+    """
+    if velocity_ms is None:
+        return "N/A"
+
+    velocity_kts = velocity_ms * 1.94384
+    velocity_kmh = velocity_ms * 3.6
+    return f"{velocity_kts:.0f} kts ({velocity_kmh:.0f} km/h)"
+
+
+def _format_timestamp(unix_timestamp: int | None) -> str:
+    """Format Unix timestamp to human-readable UTC string.
+
+    Args:
+        unix_timestamp: Unix timestamp (seconds since epoch), or None
+
+    Returns:
+        Formatted string like "2026-01-09 14:32:00 UTC" or "N/A"
+    """
+    if unix_timestamp is None:
+        return "N/A"
+
+    dt = datetime.fromtimestamp(unix_timestamp, tz=timezone.utc)
+    return dt.strftime("%Y-%m-%d %H:%M:%S UTC")
+
+
+def _format_position(latitude: float | None, longitude: float | None) -> str:
+    """Format latitude/longitude as human-readable coordinates.
+
+    Args:
+        latitude: Latitude in degrees
+        longitude: Longitude in degrees
+
+    Returns:
+        Formatted string like "37.7749N, 122.4194W" or "N/A"
+    """
+    if latitude is None or longitude is None:
+        return "N/A"
+
+    lat_dir = "N" if latitude >= 0 else "S"
+    lon_dir = "E" if longitude >= 0 else "W"
+
+    return f"{abs(latitude):.4f}{lat_dir}, {abs(longitude):.4f}{lon_dir}"
+
+
+def _analyze_track_coverage(
+    waypoints: list[dict[str, Any]],
+) -> tuple[str, list[tuple[str, str]]]:
+    """Analyze track history for coverage quality and gaps.
+
+    Args:
+        waypoints: List of waypoint dictionaries with timestamp field
+
+    Returns:
+        Tuple of (coverage_assessment, gaps) where:
+        - coverage_assessment is "Good", "Fair", or "Poor"
+        - gaps is a list of (start_time, end_time) strings for significant gaps
+    """
+    if not waypoints:
+        return ("No data", [])
+
+    if len(waypoints) < 2:
+        return ("Limited", [])
+
+    # Analyze gaps between consecutive waypoints
+    # Significant gap = more than 5 minutes (300 seconds)
+    gap_threshold = 300
+    gaps: list[tuple[str, str]] = []
+
+    for i in range(1, len(waypoints)):
+        prev_ts = waypoints[i - 1].get("timestamp")
+        curr_ts = waypoints[i].get("timestamp")
+
+        if prev_ts is not None and curr_ts is not None:
+            gap_seconds = curr_ts - prev_ts
+            if gap_seconds > gap_threshold:
+                gaps.append((
+                    _format_timestamp(prev_ts),
+                    _format_timestamp(curr_ts),
+                ))
+
+    # Assess coverage quality
+    if not gaps:
+        coverage = "Good (no significant gaps)"
+    elif len(gaps) <= 2:
+        coverage = "Fair (some gaps in coverage)"
+    else:
+        coverage = "Poor (multiple gaps - limited ADS-B reception)"
+
+    return (coverage, gaps)
+
+
+def _format_flight_output(
+    identifier: str,
+    state: dict[str, Any] | None,
+    track_waypoints: list[dict[str, Any]],
+    retrieved_at: datetime,
+) -> str:
+    """Format flight tracking data for user-friendly output.
+
+    Args:
+        identifier: Original identifier provided by user
+        state: Current aircraft state dict, or None if not broadcasting
+        track_waypoints: List of track waypoints
+        retrieved_at: When data was retrieved
+
+    Returns:
+        Formatted string with flight tracking information
+    """
+    output = f"FLIGHT TRACKING: {identifier.upper()}\n"
+    output += "=" * 55 + "\n\n"
+
+    if state is None:
+        # Aircraft not currently broadcasting
+        output += "CURRENT POSITION:\n"
+        output += "  Status: Aircraft not currently broadcasting position\n\n"
+
+        if track_waypoints:
+            # Show last known position from track
+            last_wp = track_waypoints[-1]
+            lat = last_wp.get("latitude")
+            lon = last_wp.get("longitude")
+            alt = last_wp.get("altitude")
+            on_gnd = last_wp.get("on_ground")
+            output += "LAST KNOWN POSITION:\n"
+            output += f"  Location: {_format_position(lat, lon)}\n"
+            output += f"  Altitude: {_format_altitude(alt, on_gnd)}\n"
+            output += f"  Heading: {_format_heading(last_wp.get('heading'))}\n"
+            output += f"  Last Contact: {_format_timestamp(last_wp.get('timestamp'))}\n\n"
+        else:
+            output += "  No recent position data available.\n\n"
+
+        output += "NOTE: ADS-B coverage is not global. Aircraft may be:\n"
+        output += "  - Out of range of ground receivers\n"
+        output += "  - Flying over ocean or remote areas\n"
+        output += "  - On the ground with transponder off\n"
+        output += "  - Using a different flight identifier\n\n"
+
+    else:
+        # Current position available
+        lat = state.get("latitude")
+        lon = state.get("longitude")
+        alt_baro = state.get("altitude_barometric")
+        on_gnd = state.get("on_ground")
+        output += "CURRENT POSITION:\n"
+        output += f"  Location: {_format_position(lat, lon)}\n"
+        output += f"  Altitude: {_format_altitude(alt_baro, on_gnd)}\n"
+        output += f"  Heading: {_format_heading(state.get('heading'))}\n"
+        output += f"  Ground Speed: {_format_speed(state.get('velocity'))}\n"
+        output += f"  Last Contact: {_format_timestamp(state.get('last_contact'))}\n\n"
+
+        output += "AIRCRAFT INFO:\n"
+        output += f"  ICAO24: {state.get('icao24', 'N/A')}\n"
+        if state.get("callsign"):
+            output += f"  Callsign: {state.get('callsign')}\n"
+        output += f"  Origin Country: {state.get('origin_country', 'N/A')}\n"
+        output += f"  On Ground: {'Yes' if state.get('on_ground') else 'No'}\n"
+        if state.get("squawk"):
+            output += f"  Squawk: {state.get('squawk')}\n"
+        output += "\n"
+
+    # Track history section
+    if track_waypoints:
+        coverage, gaps = _analyze_track_coverage(track_waypoints)
+
+        output += "TRACK HISTORY (last 24h):\n"
+        output += f"  Waypoints: {len(track_waypoints)} positions recorded\n"
+
+        first_ts = track_waypoints[0].get("timestamp")
+        last_ts = track_waypoints[-1].get("timestamp")
+        output += f"  First seen: {_format_timestamp(first_ts)}\n"
+        output += f"  Last seen: {_format_timestamp(last_ts)}\n"
+        output += f"  Coverage: {coverage}\n"
+
+        if gaps:
+            output += "\n  Gaps in coverage:\n"
+            for gap_start, gap_end in gaps[:3]:  # Show max 3 gaps
+                output += f"    - {gap_start} to {gap_end}\n"
+            if len(gaps) > 3:
+                output += f"    ... and {len(gaps) - 3} more gaps\n"
+    else:
+        output += "TRACK HISTORY:\n"
+        output += "  No track history available for this aircraft.\n"
+
+    output += "\n"
+
+    # Footer
+    output += "-" * 55 + "\n"
+    timestamp_str = retrieved_at.strftime("%Y-%m-%d %H:%M:%S UTC")
+    output += f"Source: OpenSky Network (retrieved {timestamp_str})\n"
+    output += "=" * 55 + "\n"
+
+    return output
+
+
+def _format_credentials_error() -> str:
+    """Format error message when OpenSky credentials are not configured.
+
+    Returns:
+        Formatted error message with registration instructions
+    """
+    return (
+        "## OpenSky Authentication Required\n\n"
+        "Flight tracking requires OpenSky Network credentials.\n\n"
+        "**How to configure:**\n\n"
+        "1. Register for a free account at: https://opensky-network.org/login\n"
+        "2. Configure credentials via environment variables:\n"
+        "   ```\n"
+        "   export IGNIFER_OPENSKY_USERNAME=your_username\n"
+        "   export IGNIFER_OPENSKY_PASSWORD=your_password\n"
+        "   ```\n"
+        "   Or add to ~/.config/ignifer/config.toml:\n"
+        "   ```toml\n"
+        '   opensky_username = "your_username"\n'
+        '   opensky_password = "your_password"\n'
+        "   ```\n\n"
+        "**Why authentication is required:**\n"
+        "- Unauthenticated requests have very low rate limits\n"
+        "- Track history requires authentication\n"
+        "- Free accounts get 400 API credits/day (sufficient for typical use)\n"
+    )
+
+
+@mcp.tool()
+async def track_flight(identifier: str) -> str:
+    """Track any aircraft by callsign, tail number, or ICAO24 code.
+
+    Returns current position, aircraft info, and 24-hour track history
+    from the OpenSky Network (community-driven ADS-B receiver network).
+
+    Args:
+        identifier: Aircraft identifier. Accepts:
+            - Callsign: "UAL123", "BAW456" (airline code + flight number)
+            - Tail number: "N12345" (US), "G-ABCD" (UK), etc.
+            - ICAO24: "abc123" (6 hex chars, transponder address)
+
+    Returns:
+        Formatted flight tracking report including position, heading,
+        speed, and track history. Or helpful error if not found.
+
+    Note:
+        ADS-B coverage varies by region. Aircraft may not be visible when:
+        - Over oceans or remote areas without ground receivers
+        - On the ground with transponder off
+        - Flying under ADS-B mandate altitude
+    """
+    # Validate identifier is not empty
+    if not identifier or not identifier.strip():
+        return (
+            "## Invalid Identifier\n\n"
+            "Please provide a valid flight identifier.\n\n"
+            "**Accepted formats:**\n"
+            "- Callsign: UAL123, BAW456\n"
+            "- Tail number: N12345, G-ABCD\n"
+            "- ICAO24: abc123 (6 hex characters)"
+        )
+
+    logger.info(f"Track flight requested for: {identifier}")
+
+    # Identify and normalize the identifier
+    identifier_type, normalized = _identify_aircraft_identifier(identifier)
+    logger.debug(f"Identifier type: {identifier_type}, normalized: {normalized}")
+
+    try:
+        opensky = _get_opensky()
+        retrieved_at = datetime.now(timezone.utc)
+
+        # Query strategy depends on identifier type
+        state: dict[str, Any] | None = None
+        icao24_for_track: str | None = None
+        track_waypoints: list[dict[str, Any]] = []
+
+        if identifier_type == "icao24":
+            # Direct ICAO24 lookup
+            state_result = await opensky.get_states(icao24=normalized)
+
+            if state_result.status == ResultStatus.SUCCESS and state_result.results:
+                state = state_result.results[0]
+                icao24_for_track = normalized
+
+            elif state_result.status == ResultStatus.RATE_LIMITED:
+                return (
+                    "## Rate Limited\n\n"
+                    "OpenSky Network is rate limiting requests.\n\n"
+                    "**Suggestions:**\n"
+                    "- Wait a few minutes before trying again\n"
+                    "- Authenticated users get higher rate limits"
+                )
+
+        elif identifier_type == "callsign":
+            # Query by callsign
+            params = QueryParams(query=normalized)
+            state_result = await opensky.query(params)
+
+            if state_result.status == ResultStatus.SUCCESS and state_result.results:
+                state = state_result.results[0]
+                icao24_raw = state.get("icao24")
+                icao24_for_track = str(icao24_raw) if icao24_raw is not None else None
+
+            elif state_result.status == ResultStatus.RATE_LIMITED:
+                return (
+                    "## Rate Limited\n\n"
+                    "OpenSky Network is rate limiting requests.\n\n"
+                    "**Suggestions:**\n"
+                    "- Wait a few minutes before trying again\n"
+                    "- Authenticated users get higher rate limits"
+                )
+
+        elif identifier_type == "tail_number":
+            # Tail numbers require database lookup for ICAO24 mapping
+            # For now, try as callsign (some aircraft use registration as callsign)
+            params = QueryParams(query=normalized.replace("-", ""))
+            state_result = await opensky.query(params)
+
+            if state_result.status == ResultStatus.SUCCESS and state_result.results:
+                state = state_result.results[0]
+                icao24_raw = state.get("icao24")
+                icao24_for_track = str(icao24_raw) if icao24_raw is not None else None
+            else:
+                # Tail number resolution not yet implemented
+                callsign_suggestion = normalized.replace("-", "")
+                return (
+                    f"## Tail Number Lookup\n\n"
+                    f"Could not find aircraft with tail number **{identifier}**.\n\n"
+                    f"**Note:** Tail number to ICAO24 resolution requires additional "
+                    f"database lookups not yet implemented.\n\n"
+                    f"**Suggestions:**\n"
+                    f"- Try searching by the flight's callsign instead (e.g., 'UAL123')\n"
+                    f"- Use the ICAO24 hex code if known (6 characters, e.g., 'abc123')\n"
+                    f"- Some aircraft use their registration as callsign - "
+                    f"try '{callsign_suggestion}'"
+                )
+
+        # Get track history if we have an ICAO24
+        if icao24_for_track:
+            try:
+                track_result = await opensky.get_track(icao24_for_track)
+
+                if track_result.status == ResultStatus.SUCCESS and track_result.results:
+                    track_waypoints = track_result.results
+
+            except AdapterAuthError:
+                # Track history requires auth - continue without it
+                logger.debug("Track history unavailable (requires authentication)")
+
+            except AdapterTimeoutError:
+                # Timeout getting track - continue with state only
+                logger.warning("Timeout getting track history")
+
+            except AdapterError as e:
+                # Other error - log and continue
+                logger.warning(f"Error getting track history: {e}")
+
+        # Format output
+        return _format_flight_output(
+            identifier=identifier,
+            state=state,
+            track_waypoints=track_waypoints,
+            retrieved_at=retrieved_at,
+        )
+
+    except AdapterAuthError:
+        logger.warning("OpenSky credentials not configured")
+        return _format_credentials_error()
+
+    except AdapterTimeoutError as e:
+        logger.warning(f"Timeout tracking flight {identifier}: {e}")
+        return (
+            f"## Request Timed Out\n\n"
+            f"The flight tracking request for **{identifier}** timed out.\n\n"
+            f"**Suggestions:**\n"
+            f"- Try again in a moment\n"
+            f"- Check your network connection\n"
+            f"- OpenSky Network may be experiencing high load"
+        )
+
+    except AdapterError as e:
+        logger.error(f"Adapter error tracking flight {identifier}: {e}")
+        return (
+            f"## Unable to Track Flight\n\n"
+            f"Could not track flight **{identifier}**.\n\n"
+            f"**What happened:** {e.message}\n\n"
+            f"**Suggestions:**\n"
+            f"- Try again in a few moments\n"
+            f"- Verify the identifier format"
+        )
+
+    except Exception as e:
+        logger.exception(f"Unexpected error tracking flight {identifier}: {e}")
+        return (
+            f"## Error\n\n"
+            f"An unexpected error occurred while tracking **{identifier}**.\n\n"
             f"Please try again later."
         )
 
