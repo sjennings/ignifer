@@ -1,0 +1,797 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Context File for Story 6.3: Conflict Analysis Tool
+  Generated: 2026-01-09
+
+  This file provides implementation context for the conflict_analysis MCP tool.
+  Read this file before implementing to understand patterns, contracts, and requirements.
+-->
+<context story="6.3" title="Conflict Analysis Tool">
+
+  <!-- ═══════════════════════════════════════════════════════════════════════════
+       SECTION 1: STORY OVERVIEW
+       ═══════════════════════════════════════════════════════════════════════════ -->
+  <story-overview>
+    <description>
+      Create an MCP tool `conflict_analysis(region, time_range)` that analyzes conflict
+      situations in any country or region using the ACLEDAdapter from Story 6.1.
+      Returns formatted conflict intelligence including event counts by type,
+      primary actors, fatality trends, and geographic hotspots.
+    </description>
+
+    <acceptance-criteria>
+      <criterion id="AC1">Tool created with @mcp.tool() decorator accepting region and optional time_range</criterion>
+      <criterion id="AC2">Returns formatted output with summary, event types, actors, trends, and hotspots</criterion>
+      <criterion id="AC3">Time range filtering works with trend comparison to previous period</criterion>
+      <criterion id="AC4">Geographic distribution display (FR20) shows admin regions sorted by event count</criterion>
+      <criterion id="AC5">Missing credentials returns helpful error with registration instructions</criterion>
+      <criterion id="AC6">No conflict data returns appropriate message noting stability or data limitations</criterion>
+    </acceptance-criteria>
+
+    <dependencies>
+      <dependency>Story 6.1: ACLED Adapter (provides ACLEDAdapter with get_events())</dependency>
+      <dependency>Story 1.6: Output Formatting (OutputFormatter patterns)</dependency>
+    </dependencies>
+  </story-overview>
+
+  <!-- ═══════════════════════════════════════════════════════════════════════════
+       SECTION 2: PROJECT RULES (from project-context.md)
+       ═══════════════════════════════════════════════════════════════════════════ -->
+  <project-rules>
+    <rule id="PR1" category="architecture">
+      Layer rule: Tools in server.py, adapters in adapters/ - never mix.
+      Adapters MUST NOT import from server.py or tools.
+    </rule>
+    <rule id="PR2" category="datetime">
+      Always use timezone-aware datetime: datetime.now(timezone.utc)
+      Never use naive datetime or deprecated datetime.utcnow()
+    </rule>
+    <rule id="PR3" category="logging">
+      stdlib logging only: logging.getLogger(__name__)
+      No loguru, no structlog
+    </rule>
+    <rule id="PR4" category="naming">
+      snake_case for all JSON fields - no exceptions
+      Adapter naming: {Source}Adapter (e.g., ACLEDAdapter)
+    </rule>
+    <rule id="PR5" category="errors">
+      Hybrid error handling:
+      - Exceptions for unexpected failures (AdapterTimeoutError, AdapterAuthError, AdapterParseError)
+      - Result type for expected operational states (ResultStatus.NO_DATA, ResultStatus.RATE_LIMITED)
+    </rule>
+    <rule id="PR6" category="datetime-format">
+      ISO 8601 + timezone for all datetime serialization: YYYY-MM-DDTHH:MM:SS+00:00
+    </rule>
+  </project-rules>
+
+  <!-- ═══════════════════════════════════════════════════════════════════════════
+       SECTION 3: MCP TOOL REGISTRATION PATTERN
+       ═══════════════════════════════════════════════════════════════════════════ -->
+  <tool-registration-pattern>
+    <description>
+      Follow the existing tool registration pattern in server.py.
+      Tools are registered using the @mcp.tool() decorator from FastMCP.
+    </description>
+
+    <example name="tool_signature">
+<![CDATA[
+from fastmcp import FastMCP
+
+mcp = FastMCP("ignifer")
+
+@mcp.tool()
+async def conflict_analysis(
+    region: str,
+    time_range: str | None = None
+) -> str:
+    """
+    Analyze conflict situations in a country or region.
+
+    Args:
+        region: Country name, region, or geographic area (e.g., "Ethiopia", "Sahel")
+        time_range: Optional time filter (e.g., "last 30 days", "last 90 days")
+
+    Returns:
+        Formatted conflict analysis with event counts, actors, and trends
+    """
+    # Implementation here
+]]>
+    </example>
+
+    <existing-tools reference="/Volumes/IceStationZero/Projects/ignifer/src/ignifer/server.py">
+      <tool name="briefing" signature="briefing(topic: str, time_range: str | None = None) -> str" />
+      <tool name="extract_article" signature="extract_article(url: str) -> str" />
+      <tool name="economic_context" signature="economic_context(country: str) -> str" />
+      <tool name="entity_lookup" signature="entity_lookup(name: str = '', identifier: str = '') -> str" />
+      <tool name="track_flight" signature="track_flight(identifier: str) -> str" />
+      <tool name="track_vessel" signature="track_vessel(identifier: str) -> str" />
+    </existing-tools>
+  </tool-registration-pattern>
+
+  <!-- ═══════════════════════════════════════════════════════════════════════════
+       SECTION 4: ACLED ADAPTER INTERFACE
+       ═══════════════════════════════════════════════════════════════════════════ -->
+  <acled-adapter-interface reference="/Volumes/IceStationZero/Projects/ignifer/src/ignifer/adapters/acled.py">
+    <properties>
+      <property name="source_name" value="acled" />
+      <property name="base_quality_tier" value="QualityTier.HIGH" />
+    </properties>
+
+    <method name="get_events" primary="true">
+      <signature>
+<![CDATA[
+async def get_events(
+    self,
+    country: str,
+    date_range: str | None = None,
+) -> OSINTResult
+]]>
+      </signature>
+      <description>
+        Get conflict events for a specific country.
+
+        Args:
+            country: Country name or ISO code.
+            date_range: Optional date range in "YYYY-MM-DD|YYYY-MM-DD" format
+                       or natural language like "last 30 days".
+
+        Returns:
+            OSINTResult with conflict event data.
+
+        Raises:
+            AdapterTimeoutError: If request times out.
+            AdapterParseError: If response cannot be parsed.
+      </description>
+    </method>
+
+    <result-structure>
+      <description>
+        ACLEDAdapter returns OSINTResult with results list.
+        First item is a summary dict, followed by normalized event dicts.
+      </description>
+      <summary-fields>
+<![CDATA[
+{
+    "summary_type": "conflict_analysis",
+    "country": "Ethiopia",
+    "total_events": 127,
+    "total_fatalities": 342,
+    "date_range_start": "2025-12-10",
+    "date_range_end": "2026-01-09",
+
+    # Event types (flattened with event_type_ prefix)
+    "event_type_battles": 45,
+    "event_type_violence_against_civilians": 38,
+    "event_type_protests": 24,
+    "event_type_explosions_remote_violence": 12,
+    "event_type_strategic_developments": 8,
+
+    # Top actors (flattened)
+    "top_actor_1_name": "Ethiopian National Defense Force (ENDF)",
+    "top_actor_1_count": 52,
+    "top_actor_2_name": "Fano Militia",
+    "top_actor_2_count": 34,
+    # ... up to top_actor_5
+
+    # Affected regions (comma-separated)
+    "affected_regions": "Amhara Region, Oromia Region, Tigray Region, SNNPR",
+
+    # Trend comparison (when date range specified)
+    "event_trend": "increasing",  # or "decreasing" or "stable"
+    "fatality_trend": "increasing",
+    "previous_period_start": "2025-11-10",
+    "previous_period_end": "2025-12-09",
+    "previous_period_events": 103,
+    "previous_period_fatalities": 278
+}
+]]>
+      </summary-fields>
+      <event-fields>
+<![CDATA[
+{
+    "event_id": "12345",
+    "event_date": "2026-01-05",
+    "year": "2026",
+    "event_type": "Battles",
+    "sub_event_type": "Armed clash",
+    "actor1": "Ethiopian National Defense Force (ENDF)",
+    "actor2": "Fano Militia",
+    "country": "Ethiopia",
+    "admin1": "Amhara Region",
+    "admin2": "North Gondar",
+    "location": "Gondar",
+    "latitude": "12.608",
+    "longitude": "37.468",
+    "fatalities": 5,
+    "notes": "Brief description of event...",
+    "source": "Local news source",
+    "source_scale": "Subnational"
+}
+]]>
+      </event-fields>
+    </result-structure>
+
+    <status-handling>
+      <status value="ResultStatus.SUCCESS">Data retrieved successfully</status>
+      <status value="ResultStatus.NO_DATA">No events found - may indicate peace or data gap</status>
+      <status value="ResultStatus.RATE_LIMITED">API rate limit reached</status>
+    </status-handling>
+
+    <credential-check>
+<![CDATA[
+# ACLEDAdapter checks credentials internally and returns helpful error:
+if credentials is None:
+    settings = get_settings()
+    return OSINTResult(
+        status=ResultStatus.NO_DATA,
+        query=country,
+        results=[],
+        sources=[],
+        retrieved_at=datetime.now(timezone.utc),
+        error=settings.get_credential_error_message("acled"),
+    )
+]]>
+    </credential-check>
+  </acled-adapter-interface>
+
+  <!-- ═══════════════════════════════════════════════════════════════════════════
+       SECTION 5: ADAPTER ACCESSOR PATTERN
+       ═══════════════════════════════════════════════════════════════════════════ -->
+  <adapter-accessor-pattern>
+    <description>
+      Create a lazy-initialized getter function for ACLEDAdapter following the
+      existing pattern in server.py for other adapters.
+    </description>
+
+    <pattern>
+<![CDATA[
+# Add to global instances section
+_acled: ACLEDAdapter | None = None
+
+def _get_acled() -> ACLEDAdapter:
+    global _acled
+    if _acled is None:
+        _acled = ACLEDAdapter(cache=_get_cache())
+    return _acled
+]]>
+    </pattern>
+
+    <imports-to-add>
+<![CDATA[
+# Add to imports from ignifer.adapters
+from ignifer.adapters import (
+    # ... existing imports ...
+    ACLEDAdapter,
+)
+]]>
+    </imports-to-add>
+
+    <cleanup-registration>
+<![CDATA[
+# Add to _cleanup_resources() function
+async def _cleanup_resources() -> None:
+    """Close all open resources (adapters, cache connections)."""
+    global _adapter, _worldbank, _wikidata, _opensky, _aisstream, _acled, _entity_resolver, _cache
+
+    # ... existing cleanup code ...
+
+    adapters = [
+        (_adapter, "_adapter"),
+        (_worldbank, "_worldbank"),
+        (_wikidata, "_wikidata"),
+        (_opensky, "_opensky"),
+        (_aisstream, "_aisstream"),
+        (_acled, "_acled"),  # Add ACLED adapter
+    ]
+    # ... rest of cleanup ...
+]]>
+    </cleanup-registration>
+  </adapter-accessor-pattern>
+
+  <!-- ═══════════════════════════════════════════════════════════════════════════
+       SECTION 6: ERROR HANDLING PATTERN
+       ═══════════════════════════════════════════════════════════════════════════ -->
+  <error-handling-pattern>
+    <description>
+      Follow the established error handling pattern from existing tools.
+      Catch specific adapter exceptions and convert to user-friendly messages.
+    </description>
+
+    <imports>
+<![CDATA[
+from ignifer.adapters.base import AdapterAuthError, AdapterError, AdapterTimeoutError
+]]>
+    </imports>
+
+    <pattern>
+<![CDATA[
+@mcp.tool()
+async def conflict_analysis(region: str, time_range: str | None = None) -> str:
+    """..."""
+    logger.info(f"Conflict analysis requested for: {region}")
+
+    try:
+        acled = _get_acled()
+        result = await acled.get_events(region, date_range=time_range)
+
+        # Handle expected operational states via Result type
+        if result.status == ResultStatus.NO_DATA:
+            # Check if it's a credential error (error message will be set)
+            if result.error and "credential" in result.error.lower():
+                return result.error
+            return _format_no_conflict_message(region)
+
+        if result.status == ResultStatus.RATE_LIMITED:
+            return (
+                "## Rate Limited\n\n"
+                "ACLED API rate limit reached. Please try again later.\n\n"
+                "**Suggestions:**\n"
+                "- Wait a few minutes before trying again\n"
+                "- ACLED has daily API limits"
+            )
+
+        # Success - format the output
+        return _format_conflict_analysis(result, region, time_range)
+
+    except AdapterAuthError:
+        # This shouldn't happen (adapter returns error in result) but handle anyway
+        settings = get_settings()
+        return settings.get_credential_error_message("acled")
+
+    except AdapterTimeoutError as e:
+        logger.warning(f"Timeout analyzing conflict in {region}: {e}")
+        return (
+            f"## Request Timed Out\n\n"
+            f"The conflict analysis request for **{region}** timed out.\n\n"
+            f"**Suggestions:**\n"
+            f"- Try again in a moment\n"
+            f"- Check your network connection\n"
+            f"- ACLED API may be experiencing high load"
+        )
+
+    except AdapterError as e:
+        logger.error(f"Adapter error analyzing conflict in {region}: {e}")
+        return (
+            f"## Unable to Retrieve Data\n\n"
+            f"Could not analyze conflict data for **{region}**.\n\n"
+            f"**What happened:** {e.message}\n\n"
+            f"**Suggestions:**\n"
+            f"- Try again in a few moments\n"
+            f"- Verify the region/country name"
+        )
+
+    except Exception as e:
+        logger.exception(f"Unexpected error analyzing conflict in {region}: {e}")
+        return (
+            f"## Error\n\n"
+            f"An unexpected error occurred while analyzing **{region}**.\n\n"
+            f"Please try again later."
+        )
+]]>
+    </pattern>
+  </error-handling-pattern>
+
+  <!-- ═══════════════════════════════════════════════════════════════════════════
+       SECTION 7: OUTPUT FORMAT SPECIFICATION
+       ═══════════════════════════════════════════════════════════════════════════ -->
+  <output-format-specification>
+    <description>
+      The conflict analysis tool should produce formatted output consistent with
+      other Ignifer tools. Use the TSUKUYOMI style from OutputFormatter.
+    </description>
+
+    <visual-constants reference="/Volumes/IceStationZero/Projects/ignifer/src/ignifer/output.py">
+<![CDATA[
+DIVIDER_PRIMARY = "=" * 55   # Section headers
+DIVIDER_SECONDARY = "-" * 55  # Sub-sections
+]]>
+    </visual-constants>
+
+    <expected-output-format>
+<![CDATA[
+CONFLICT ANALYSIS: Ethiopia
+Period: Last 30 days (2025-12-10 to 2026-01-09)
+
+SUMMARY
+-------
+Total Events: 127
+Total Fatalities: 342
+Trend: INCREASING (+23% vs previous period)
+
+EVENT TYPES
+-----------
+- Battles: 45 events (35%)
+- Violence against civilians: 38 events (30%)
+- Protests: 24 events (19%)
+- Explosions/Remote violence: 12 events (9%)
+- Strategic developments: 8 events (6%)
+
+PRIMARY ACTORS
+--------------
+- Ethiopian National Defense Force (ENDF): 52 events
+- Fano Militia: 34 events
+- Oromo Liberation Army (OLA): 28 events
+- Unidentified armed groups: 13 events
+
+GEOGRAPHIC HOTSPOTS
+-------------------
+- Amhara Region: 47 events (37%)
+- Oromia Region: 35 events (28%)
+- Tigray Region: 22 events (17%)
+- SNNPR: 14 events (11%)
+
+FATALITY TRENDS
+---------------
+Current period: 342 fatalities
+Previous period: 278 fatalities
+Change: +23% (INCREASING)
+
+-------------------------------------------------------
+Sources: ACLED (https://acleddata.com/)
+Data retrieved: 2026-01-09T14:30:00+00:00
+=======================================================
+]]>
+    </expected-output-format>
+
+    <no-data-format>
+<![CDATA[
+## No Conflict Data Available
+
+No conflict events found for **{region}** in the requested time period.
+
+This could indicate:
+- Relatively peaceful conditions in this area
+- Limited ACLED data coverage for this specific region
+- Data not yet processed for recent events
+
+**Suggestions:**
+- Try a broader time range (e.g., "last 90 days")
+- Verify the country/region name spelling
+- Check ACLED coverage at https://acleddata.com/
+
+*Note: Absence of data does not confirm absence of conflict.*
+]]>
+    </no-data-format>
+
+    <formatting-helpers>
+<![CDATA[
+def _format_trend(trend: str, current: int, previous: int) -> str:
+    """Format trend indicator with percentage change."""
+    if previous == 0:
+        if current > 0:
+            return "INCREASING (new activity)"
+        return "STABLE (no activity)"
+
+    pct_change = ((current - previous) / previous) * 100
+    sign = "+" if pct_change >= 0 else ""
+    trend_upper = trend.upper()
+    return f"{trend_upper} ({sign}{pct_change:.0f}% vs previous period)"
+
+def _format_event_type_breakdown(summary: dict) -> list[str]:
+    """Extract and format event type breakdown from summary."""
+    lines = []
+    total = summary.get("total_events", 0)
+
+    # Extract event_type_ prefixed fields
+    event_types = []
+    for key, value in summary.items():
+        if key.startswith("event_type_") and isinstance(value, int):
+            # Convert key back to display name
+            display_name = key[11:].replace("_", " ").title()
+            event_types.append((display_name, value))
+
+    # Sort by count descending
+    event_types.sort(key=lambda x: x[1], reverse=True)
+
+    for event_type, count in event_types:
+        pct = (count / total * 100) if total > 0 else 0
+        lines.append(f"- {event_type}: {count} events ({pct:.0f}%)")
+
+    return lines
+
+def _format_geographic_hotspots(summary: dict, total_events: int) -> list[str]:
+    """Format geographic distribution from affected_regions."""
+    lines = []
+    regions_str = summary.get("affected_regions", "")
+
+    if not regions_str:
+        return ["- No geographic breakdown available"]
+
+    # Parse the comma-separated regions
+    # Note: ACLED provides counts in top_actor fields, but regions are just names
+    # For full implementation, you may need to count from individual events
+    regions = [r.strip() for r in regions_str.split(",") if r.strip()]
+
+    for region in regions[:10]:  # Top 10
+        lines.append(f"- {region}")
+
+    return lines
+]]>
+    </formatting-helpers>
+  </output-format-specification>
+
+  <!-- ═══════════════════════════════════════════════════════════════════════════
+       SECTION 8: TESTING PATTERNS
+       ═══════════════════════════════════════════════════════════════════════════ -->
+  <testing-patterns reference="/Volumes/IceStationZero/Projects/ignifer/tests/test_server.py">
+    <description>
+      Follow the existing test patterns from test_server.py.
+      Use pytest-asyncio with mock adapters.
+    </description>
+
+    <test-file-location>/Volumes/IceStationZero/Projects/ignifer/tests/test_conflict_analysis.py</test-file-location>
+
+    <mock-pattern>
+<![CDATA[
+"""Tests for conflict_analysis tool."""
+
+from datetime import datetime, timezone
+from unittest.mock import AsyncMock, patch
+
+import pytest
+
+from ignifer.adapters.base import AdapterTimeoutError
+from ignifer.models import (
+    ConfidenceLevel,
+    OSINTResult,
+    QualityTier,
+    ResultStatus,
+    SourceAttribution,
+    SourceMetadata,
+)
+from ignifer.server import conflict_analysis
+
+
+def _create_mock_conflict_result(
+    country: str = "Ethiopia",
+    total_events: int = 127,
+    total_fatalities: int = 342,
+    with_trends: bool = True,
+) -> OSINTResult:
+    """Create a mock ACLED result for testing."""
+    summary = {
+        "summary_type": "conflict_analysis",
+        "country": country,
+        "total_events": total_events,
+        "total_fatalities": total_fatalities,
+        "date_range_start": "2025-12-10",
+        "date_range_end": "2026-01-09",
+        "event_type_battles": 45,
+        "event_type_violence_against_civilians": 38,
+        "event_type_protests": 24,
+        "top_actor_1_name": "Ethiopian National Defense Force",
+        "top_actor_1_count": 52,
+        "top_actor_2_name": "Fano Militia",
+        "top_actor_2_count": 34,
+        "affected_regions": "Amhara Region, Oromia Region, Tigray Region",
+    }
+
+    if with_trends:
+        summary.update({
+            "event_trend": "increasing",
+            "fatality_trend": "increasing",
+            "previous_period_start": "2025-11-10",
+            "previous_period_end": "2025-12-09",
+            "previous_period_events": 103,
+            "previous_period_fatalities": 278,
+        })
+
+    return OSINTResult(
+        status=ResultStatus.SUCCESS,
+        query=country,
+        results=[summary],
+        sources=[
+            SourceAttribution(
+                source="acled",
+                quality=QualityTier.HIGH,
+                confidence=ConfidenceLevel.VERY_LIKELY,
+                metadata=SourceMetadata(
+                    source_name="acled",
+                    source_url="https://api.acleddata.com/acled/read",
+                    retrieved_at=datetime.now(timezone.utc),
+                ),
+            )
+        ],
+        retrieved_at=datetime.now(timezone.utc),
+    )
+
+
+class TestConflictAnalysisTool:
+    @pytest.mark.asyncio
+    async def test_conflict_analysis_success(self) -> None:
+        """Conflict analysis returns formatted output on success."""
+        mock_result = _create_mock_conflict_result()
+
+        with patch("ignifer.server._get_acled") as mock_acled:
+            adapter_instance = AsyncMock()
+            adapter_instance.get_events.return_value = mock_result
+            mock_acled.return_value = adapter_instance
+
+            result = await conflict_analysis.fn("Ethiopia")
+
+            assert "CONFLICT ANALYSIS" in result
+            assert "ETHIOPIA" in result.upper()
+            assert "EVENT TYPES" in result or "Event Types" in result
+            assert "127" in result  # Total events
+
+    @pytest.mark.asyncio
+    async def test_conflict_analysis_with_time_range(self) -> None:
+        """Time range parameter is passed to adapter."""
+        mock_result = _create_mock_conflict_result()
+
+        with patch("ignifer.server._get_acled") as mock_acled:
+            adapter_instance = AsyncMock()
+            adapter_instance.get_events.return_value = mock_result
+            mock_acled.return_value = adapter_instance
+
+            result = await conflict_analysis.fn("Ethiopia", time_range="last 90 days")
+
+            adapter_instance.get_events.assert_called_once_with(
+                "Ethiopia", date_range="last 90 days"
+            )
+            assert "CONFLICT ANALYSIS" in result
+
+    @pytest.mark.asyncio
+    async def test_conflict_analysis_no_credentials(self) -> None:
+        """Missing credentials returns helpful error message."""
+        mock_result = OSINTResult(
+            status=ResultStatus.NO_DATA,
+            query="Ethiopia",
+            results=[],
+            sources=[],
+            retrieved_at=datetime.now(timezone.utc),
+            error="ACLED API credentials not configured...",
+        )
+
+        with patch("ignifer.server._get_acled") as mock_acled:
+            adapter_instance = AsyncMock()
+            adapter_instance.get_events.return_value = mock_result
+            mock_acled.return_value = adapter_instance
+
+            result = await conflict_analysis.fn("Ethiopia")
+
+            assert "credential" in result.lower() or "ACLED" in result
+
+    @pytest.mark.asyncio
+    async def test_conflict_analysis_no_data(self) -> None:
+        """No conflict data returns appropriate message."""
+        mock_result = OSINTResult(
+            status=ResultStatus.NO_DATA,
+            query="Norway",
+            results=[],
+            sources=[],
+            retrieved_at=datetime.now(timezone.utc),
+        )
+
+        with patch("ignifer.server._get_acled") as mock_acled:
+            adapter_instance = AsyncMock()
+            adapter_instance.get_events.return_value = mock_result
+            mock_acled.return_value = adapter_instance
+
+            result = await conflict_analysis.fn("Norway")
+
+            assert "Norway" in result
+            assert "No conflict" in result.lower() or "no data" in result.lower()
+
+    @pytest.mark.asyncio
+    async def test_conflict_analysis_timeout(self) -> None:
+        """Timeout returns user-friendly message."""
+        with patch("ignifer.server._get_acled") as mock_acled:
+            adapter_instance = AsyncMock()
+            adapter_instance.get_events.side_effect = AdapterTimeoutError("acled", 15.0)
+            mock_acled.return_value = adapter_instance
+
+            result = await conflict_analysis.fn("Ethiopia")
+
+            assert "Timed Out" in result
+            assert "Ethiopia" in result
+]]>
+    </mock-pattern>
+
+    <required-tests>
+      <test name="test_conflict_analysis_success">Returns formatted analysis for valid country</test>
+      <test name="test_conflict_analysis_with_time_range">Time range filtering works</test>
+      <test name="test_conflict_analysis_includes_event_types">Event type breakdown present</test>
+      <test name="test_conflict_analysis_includes_actors">Actor breakdown present</test>
+      <test name="test_conflict_analysis_includes_geographic_distribution">Admin regions present (FR20)</test>
+      <test name="test_conflict_analysis_includes_trends">Trend comparison when date range specified</test>
+      <test name="test_conflict_analysis_no_credentials">Returns credential error message</test>
+      <test name="test_conflict_analysis_no_data">Returns appropriate message for peaceful regions</test>
+      <test name="test_conflict_analysis_rate_limited">Handles rate limiting gracefully</test>
+      <test name="test_conflict_analysis_timeout">Handles timeout gracefully</test>
+      <test name="test_conflict_analysis_source_attribution">Includes ACLED source info</test>
+    </required-tests>
+  </testing-patterns>
+
+  <!-- ═══════════════════════════════════════════════════════════════════════════
+       SECTION 9: IMPLEMENTATION CHECKLIST
+       ═══════════════════════════════════════════════════════════════════════════ -->
+  <implementation-checklist>
+    <phase name="Setup">
+      <task>Add ACLEDAdapter import to server.py imports</task>
+      <task>Add _acled global variable</task>
+      <task>Add _get_acled() accessor function</task>
+      <task>Add _acled to _cleanup_resources() function</task>
+    </phase>
+
+    <phase name="Core Implementation">
+      <task>Create conflict_analysis() tool function with @mcp.tool() decorator</task>
+      <task>Add docstring matching MCP tool requirements</task>
+      <task>Call ACLEDAdapter.get_events() with region and time_range</task>
+      <task>Handle ResultStatus.NO_DATA (check for credential error vs no events)</task>
+      <task>Handle ResultStatus.RATE_LIMITED</task>
+      <task>Handle ResultStatus.SUCCESS with formatting</task>
+    </phase>
+
+    <phase name="Formatting">
+      <task>Create _format_conflict_analysis() helper function</task>
+      <task>Format header with region name and period</task>
+      <task>Format summary section with total events and fatalities</task>
+      <task>Format event type breakdown with percentages</task>
+      <task>Format primary actors section</task>
+      <task>Format geographic hotspots section (FR20)</task>
+      <task>Format trend comparison section (if data available)</task>
+      <task>Add source attribution footer</task>
+      <task>Create _format_no_conflict_message() for NO_DATA cases</task>
+    </phase>
+
+    <phase name="Error Handling">
+      <task>Catch and handle AdapterAuthError</task>
+      <task>Catch and handle AdapterTimeoutError</task>
+      <task>Catch and handle AdapterError</task>
+      <task>Catch and handle generic Exception</task>
+    </phase>
+
+    <phase name="Testing">
+      <task>Create tests/test_conflict_analysis.py</task>
+      <task>Implement all required test cases</task>
+      <task>Verify 80%+ code coverage on new code</task>
+      <task>Run full test suite to ensure no regressions</task>
+    </phase>
+  </implementation-checklist>
+
+  <!-- ═══════════════════════════════════════════════════════════════════════════
+       SECTION 10: FILES TO MODIFY/CREATE
+       ═══════════════════════════════════════════════════════════════════════════ -->
+  <files>
+    <file path="/Volumes/IceStationZero/Projects/ignifer/src/ignifer/server.py" action="modify">
+      <changes>
+        <change>Add ACLEDAdapter import</change>
+        <change>Add _acled global variable</change>
+        <change>Add _get_acled() accessor function</change>
+        <change>Update _cleanup_resources() to include _acled</change>
+        <change>Add conflict_analysis() tool function</change>
+        <change>Add _format_conflict_analysis() helper</change>
+        <change>Add _format_no_conflict_message() helper</change>
+      </changes>
+    </file>
+
+    <file path="/Volumes/IceStationZero/Projects/ignifer/tests/test_conflict_analysis.py" action="create">
+      <description>Test file for conflict_analysis tool</description>
+    </file>
+  </files>
+
+  <!-- ═══════════════════════════════════════════════════════════════════════════
+       SECTION 11: REFERENCE IMPORTS
+       ═══════════════════════════════════════════════════════════════════════════ -->
+  <reference-imports>
+    <description>Complete imports needed for the conflict_analysis implementation</description>
+<![CDATA[
+# Already present in server.py - verify these are there:
+import logging
+from datetime import datetime, timezone
+
+from ignifer.adapters import (
+    AdapterAuthError,
+    AdapterError,
+    AdapterTimeoutError,
+    # Add: ACLEDAdapter,
+)
+from ignifer.models import ResultStatus
+from ignifer.config import get_settings
+
+logger = logging.getLogger(__name__)
+]]>
+  </reference-imports>
+
+</context>

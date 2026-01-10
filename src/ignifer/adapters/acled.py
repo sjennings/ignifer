@@ -344,9 +344,15 @@ class ACLEDAdapter:
             summary[f"top_actor_{i+1}_name"] = actor
             summary[f"top_actor_{i+1}_count"] = count
 
-        # Add affected regions (comma-separated list)
-        top_regions = [r for r, _ in regions.most_common(10)]
-        summary["affected_regions"] = ", ".join(top_regions) if top_regions else None
+        # Add affected regions with counts (flattened, like actors)
+        top_regions = regions.most_common(10)
+        for i, (region, count) in enumerate(top_regions):
+            summary[f"top_region_{i+1}_name"] = region
+            summary[f"top_region_{i+1}_count"] = count
+
+        # Keep comma-separated list for backward compatibility
+        region_names = [r for r, _ in top_regions]
+        summary["affected_regions"] = ", ".join(region_names) if region_names else None
 
         return summary
 

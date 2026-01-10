@@ -11,6 +11,7 @@ import trafilatura
 from fastmcp import FastMCP
 
 from ignifer.adapters import (
+    ACLEDAdapter,
     AdapterAuthError,
     AdapterError,
     AdapterTimeoutError,
@@ -43,6 +44,7 @@ _worldbank: WorldBankAdapter | None = None
 _wikidata: WikidataAdapter | None = None
 _opensky: OpenSkyAdapter | None = None
 _aisstream: AISStreamAdapter | None = None
+_acled: ACLEDAdapter | None = None
 _entity_resolver: EntityResolver | None = None
 _formatter: OutputFormatter | None = None
 
@@ -89,6 +91,13 @@ def _get_aisstream() -> AISStreamAdapter:
     return _aisstream
 
 
+def _get_acled() -> ACLEDAdapter:
+    global _acled
+    if _acled is None:
+        _acled = ACLEDAdapter(cache=_get_cache())
+    return _acled
+
+
 def _get_entity_resolver() -> EntityResolver:
     global _entity_resolver
     if _entity_resolver is None:
@@ -105,7 +114,7 @@ def _get_formatter() -> OutputFormatter:
 
 async def _cleanup_resources() -> None:
     """Close all open resources (adapters, cache connections)."""
-    global _adapter, _worldbank, _wikidata, _opensky, _aisstream, _entity_resolver, _cache
+    global _adapter, _worldbank, _wikidata, _opensky, _aisstream, _acled, _entity_resolver, _cache
 
     # Clear entity resolver first (it references wikidata adapter)
     _entity_resolver = None
@@ -117,6 +126,7 @@ async def _cleanup_resources() -> None:
         (_wikidata, "_wikidata"),
         (_opensky, "_opensky"),
         (_aisstream, "_aisstream"),
+        (_acled, "_acled"),
     ]
     for adapter, name in adapters:
         if adapter is not None:
@@ -2202,6 +2212,361 @@ async def track_vessel(identifier: str) -> str:
         return (
             f"## Error\n\n"
             f"An unexpected error occurred while tracking **{identifier}**.\n\n"
+            f"Please try again later."
+        )
+
+
+# =============================================================================
+# Conflict Analysis Tool
+# =============================================================================
+
+
+def _format_trend_indicator(
+    trend: str | None, current: int, previous: int
+) -> str:
+    """Format trend indicator with percentage change.
+
+    Args:
+        trend: Trend direction ("increasing", "decreasing", "stable"), or None
+        current: Current period value
+        previous: Previous period value
+
+    Returns:
+        Formatted trend string like "INCREASING (+23% vs previous period)"
+    """
+    if trend is None:
+        return "N/A"
+
+    if previous == 0:
+        if current > 0:
+            return "INCREASING (new activity)"
+        return "STABLE (no activity)"
+
+    pct_change = ((current - previous) / previous) * 100
+    sign = "+" if pct_change >= 0 else ""
+    trend_upper = trend.upper()
+    return f"{trend_upper} ({sign}{pct_change:.0f}% vs previous period)"
+
+
+def _format_event_type_breakdown(summary: dict[str, Any]) -> list[str]:
+    """Extract and format event type breakdown from summary.
+
+    Args:
+        summary: Summary dict containing event_type_* fields
+
+    Returns:
+        List of formatted lines for each event type
+    """
+    lines = []
+    total = summary.get("total_events", 0)
+
+    # Extract event_type_ prefixed fields
+    event_types: list[tuple[str, int]] = []
+    for key, value in summary.items():
+        if key.startswith("event_type_") and isinstance(value, int):
+            # Convert key back to display name
+            display_name = key[11:].replace("_", " ").title()
+            event_types.append((display_name, value))
+
+    # Sort by count descending
+    event_types.sort(key=lambda x: x[1], reverse=True)
+
+    for event_type, count in event_types:
+        pct = (count / total * 100) if total > 0 else 0
+        lines.append(f"- {event_type}: {count} events ({pct:.0f}%)")
+
+    return lines
+
+
+def _format_primary_actors(summary: dict[str, Any]) -> list[str]:
+    """Extract and format primary actors from summary.
+
+    Args:
+        summary: Summary dict containing top_actor_* fields
+
+    Returns:
+        List of formatted lines for each actor
+    """
+    lines = []
+
+    # Extract top actors (numbered 1-5)
+    actors: list[tuple[str, int]] = []
+    for i in range(1, 6):
+        name_key = f"top_actor_{i}_name"
+        count_key = f"top_actor_{i}_count"
+        if name_key in summary and count_key in summary:
+            name = summary[name_key]
+            count = summary[count_key]
+            if name and isinstance(count, int):
+                actors.append((str(name), count))
+
+    for actor_name, count in actors:
+        # Truncate long actor names
+        if len(actor_name) > 45:
+            actor_name = actor_name[:42] + "..."
+        lines.append(f"- {actor_name}: {count} events")
+
+    return lines
+
+
+def _format_geographic_hotspots(
+    summary: dict[str, Any], total_events: int
+) -> list[str]:
+    """Format geographic distribution with event counts and percentages.
+
+    Args:
+        summary: Summary dict containing top_region_N_name/count fields
+        total_events: Total number of events for percentage calculation
+
+    Returns:
+        List of formatted lines for each region with counts and percentages
+    """
+    lines = []
+
+    # Extract regions with counts from flattened summary
+    regions: list[tuple[str, int]] = []
+    for i in range(1, 11):  # Up to 10 regions
+        name = summary.get(f"top_region_{i}_name")
+        count = summary.get(f"top_region_{i}_count")
+        if name and isinstance(count, int):
+            regions.append((str(name), count))
+
+    if not regions:
+        # Fallback to comma-separated list if counts not available
+        regions_str = summary.get("affected_regions", "")
+        if not regions_str:
+            return ["- No geographic breakdown available"]
+        region_names = [r.strip() for r in str(regions_str).split(",") if r.strip()]
+        for region in region_names[:10]:
+            lines.append(f"- {region}")
+        return lines
+
+    # Format with counts and percentages
+    for region_name, count in regions:
+        if total_events > 0:
+            pct = (count / total_events) * 100
+            lines.append(f"- {region_name}: {count} events ({pct:.1f}%)")
+        else:
+            lines.append(f"- {region_name}: {count} events")
+
+    return lines
+
+
+def _format_no_conflict_message(region: str) -> str:
+    """Format message for regions with no conflict data.
+
+    Args:
+        region: The queried region name
+
+    Returns:
+        Formatted message with suggestions
+    """
+    return (
+        f"## No Conflict Data Available\n\n"
+        f"No conflict events found for **{region}** in the requested time period.\n\n"
+        f"This could indicate:\n"
+        f"- Relatively peaceful conditions in this area\n"
+        f"- Limited ACLED data coverage for this specific region\n"
+        f"- Data not yet processed for recent events\n\n"
+        f"**Suggestions:**\n"
+        f'- Try a broader time range (e.g., "last 90 days")\n'
+        f"- Verify the country/region name spelling\n"
+        f"- Check ACLED coverage at https://acleddata.com/\n\n"
+        f"*Note: Absence of data does not confirm absence of conflict.*"
+    )
+
+
+def _format_conflict_analysis(
+    result: Any,  # OSINTResult
+    region: str,
+    time_range: str | None,
+) -> str:
+    """Format conflict analysis result for user-friendly output.
+
+    Args:
+        result: OSINTResult from ACLEDAdapter
+        region: Original region query
+        time_range: Optional time range string
+
+    Returns:
+        Formatted conflict analysis report
+    """
+    # Extract summary (first item in results)
+    if not result.results:
+        return _format_no_conflict_message(region)
+
+    summary = result.results[0]
+    if not summary or summary.get("summary_type") != "conflict_analysis":
+        return _format_no_conflict_message(region)
+
+    country = summary.get("country", region)
+    total_events = summary.get("total_events", 0)
+    total_fatalities = summary.get("total_fatalities", 0)
+    date_start = summary.get("date_range_start", "N/A")
+    date_end = summary.get("date_range_end", "N/A")
+
+    # Build output
+    output = f"CONFLICT ANALYSIS: {country.upper()}\n"
+    output += "=" * 55 + "\n"
+
+    # Period line
+    if time_range:
+        output += f"Period: {time_range} ({date_start} to {date_end})\n"
+    else:
+        output += f"Period: {date_start} to {date_end}\n"
+    output += "\n"
+
+    # === SUMMARY ===
+    output += "SUMMARY\n"
+    output += "-" * 55 + "\n"
+    output += f"Total Events: {total_events}\n"
+    output += f"Total Fatalities: {total_fatalities}\n"
+
+    # Trend (if available)
+    event_trend = summary.get("event_trend")
+    prev_events = summary.get("previous_period_events", 0)
+    if event_trend:
+        trend_str = _format_trend_indicator(event_trend, total_events, prev_events)
+        output += f"Trend: {trend_str}\n"
+    output += "\n"
+
+    # === EVENT TYPES ===
+    event_type_lines = _format_event_type_breakdown(summary)
+    if event_type_lines:
+        output += "EVENT TYPES\n"
+        output += "-" * 55 + "\n"
+        for line in event_type_lines:
+            output += line + "\n"
+        output += "\n"
+
+    # === PRIMARY ACTORS ===
+    actor_lines = _format_primary_actors(summary)
+    if actor_lines:
+        output += "PRIMARY ACTORS\n"
+        output += "-" * 55 + "\n"
+        for line in actor_lines:
+            output += line + "\n"
+        output += "\n"
+
+    # === GEOGRAPHIC HOTSPOTS (FR20) ===
+    geo_lines = _format_geographic_hotspots(summary, total_events)
+    if geo_lines:
+        output += "GEOGRAPHIC HOTSPOTS\n"
+        output += "-" * 55 + "\n"
+        for line in geo_lines:
+            output += line + "\n"
+        output += "\n"
+
+    # === FATALITY TRENDS ===
+    prev_fatalities = summary.get("previous_period_fatalities")
+    fatality_trend = summary.get("fatality_trend")
+    if prev_fatalities is not None and fatality_trend:
+        output += "FATALITY TRENDS\n"
+        output += "-" * 55 + "\n"
+        output += f"Current period: {total_fatalities} fatalities\n"
+        output += f"Previous period: {prev_fatalities} fatalities\n"
+        trend_str = _format_trend_indicator(fatality_trend, total_fatalities, prev_fatalities)
+        output += f"Change: {trend_str}\n"
+        output += "\n"
+
+    # === Footer ===
+    output += "-" * 55 + "\n"
+    output += "Sources: ACLED (https://acleddata.com/)\n"
+    retrieved_at = result.retrieved_at.strftime("%Y-%m-%dT%H:%M:%S+00:00")
+    output += f"Data retrieved: {retrieved_at}\n"
+    output += "=" * 55 + "\n"
+
+    return output
+
+
+@mcp.tool()
+async def conflict_analysis(
+    region: str,
+    time_range: str | None = None,
+) -> str:
+    """Analyze conflict situations in a country or region.
+
+    Returns conflict intelligence including event counts by type,
+    primary actors involved, fatality trends, and geographic hotspots.
+    Data sourced from ACLED (Armed Conflict Location & Event Data).
+
+    Args:
+        region: Country name, region, or geographic area (e.g., "Ethiopia", "Sahel")
+        time_range: Optional time filter. Supported formats:
+            - "last 30 days", "last 90 days"
+            - "last 7 days", "last 2 weeks"
+            - "2026-01-01 to 2026-01-08" (ISO date range)
+            If not specified, defaults to last 30 days.
+
+    Returns:
+        Formatted conflict analysis with event counts, actors, and trends.
+        Or helpful error if data unavailable.
+
+    Note:
+        Requires ACLED API credentials. Register free at:
+        https://acleddata.com/register/
+    """
+    # Validate input: empty region produces confusing output
+    if not region or not region.strip():
+        return "Please provide a country or region name to analyze."
+
+    logger.info(f"Conflict analysis requested for: {region}")
+
+    try:
+        acled = _get_acled()
+        result = await acled.get_events(region, date_range=time_range)
+
+        # Handle expected operational states via Result type
+        if result.status == ResultStatus.NO_DATA:
+            # Check if it's a credential error (error message will be set)
+            if result.error and "credential" in result.error.lower():
+                return result.error
+            return _format_no_conflict_message(region)
+
+        if result.status == ResultStatus.RATE_LIMITED:
+            return (
+                "## Rate Limited\n\n"
+                "ACLED API rate limit reached. Please try again later.\n\n"
+                "**Suggestions:**\n"
+                "- Wait a few minutes before trying again\n"
+                "- ACLED has daily API limits"
+            )
+
+        # Success - format the output
+        return _format_conflict_analysis(result, region, time_range)
+
+    except AdapterAuthError:
+        # This shouldn't happen (adapter returns error in result) but handle anyway
+        settings = get_settings()
+        return settings.get_credential_error_message("acled")
+
+    except AdapterTimeoutError as e:
+        logger.warning(f"Timeout analyzing conflict in {region}: {e}")
+        return (
+            f"## Request Timed Out\n\n"
+            f"The conflict analysis request for **{region}** timed out.\n\n"
+            f"**Suggestions:**\n"
+            f"- Try again in a moment\n"
+            f"- Check your network connection\n"
+            f"- ACLED API may be experiencing high load"
+        )
+
+    except AdapterError as e:
+        logger.error(f"Adapter error analyzing conflict in {region}: {e}")
+        return (
+            f"## Unable to Retrieve Data\n\n"
+            f"Could not analyze conflict data for **{region}**.\n\n"
+            f"**What happened:** {e.message}\n\n"
+            f"**Suggestions:**\n"
+            f"- Try again in a few moments\n"
+            f"- Verify the region/country name"
+        )
+
+    except Exception as e:
+        logger.exception(f"Unexpected error analyzing conflict in {region}: {e}")
+        return (
+            f"## Error\n\n"
+            f"An unexpected error occurred while analyzing **{region}**.\n\n"
             f"Please try again later."
         )
 
