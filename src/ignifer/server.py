@@ -456,6 +456,84 @@ async def briefing(
                     except Exception as e:
                         logger.debug(f"Failed to get metadata for {domain}: {e}")
 
+        # Check if there are sources that need analysis BEFORE providing the report
+        from ignifer.source_metadata import ENRICHMENT_GDELT_BASELINE, MAX_DOMAINS_FOR_ANALYSIS
+
+        unanalyzed_domains = []
+        if source_metadata_map:
+            # Count articles per domain for sorting
+            domain_counts: dict[str, int] = {}
+            for article in result.results:
+                domain = article.get("domain", "")
+                if domain:
+                    try:
+                        normalized = normalize_domain(domain)
+                        domain_counts[normalized] = domain_counts.get(normalized, 0) + 1
+                    except Exception:
+                        pass
+
+            # Find domains that need analysis
+            for domain, entry in source_metadata_map.items():
+                if entry.enrichment_source == ENRICHMENT_GDELT_BASELINE:
+                    count = domain_counts.get(domain, 1)
+                    unanalyzed_domains.append((domain, entry.nation, entry.language, count))
+
+            # Sort by frequency and limit
+            unanalyzed_domains.sort(key=lambda x: -x[3])
+            unanalyzed_domains = unanalyzed_domains[:MAX_DOMAINS_FOR_ANALYSIS]
+
+        # If there are unanalyzed sources, return ONLY analysis instructions (no report)
+        if unanalyzed_domains:
+            num = len(unanalyzed_domains)
+            lines = []
+            lines.append("## Source Analysis Required")
+            lines.append("")
+            lines.append(f"Found {len(result.results)} articles from {num} unanalyzed sources.")
+            lines.append("**You must analyze these sources before I can provide the briefing.**")
+            lines.append("")
+            lines.append("### Sources to Analyze")
+            lines.append("")
+
+            for i, (domain, nation, language, count) in enumerate(unanalyzed_domains[:10], 1):
+                nation_str = nation if nation else "Unknown"
+                lines.append(f"{i}. **{domain}** ({nation_str}) - {count} articles")
+                lines.append(f"   - WebSearch: `{domain} media bias reliability rating`")
+                lines.append(f"   - Then call: `set_source_reliability(\"{domain}\", \"<A-F>\")`")
+                lines.append("")
+
+            if num > 10:
+                lines.append(f"*...plus {num - 10} more sources*")
+                lines.append("")
+
+            lines.append("### Reliability Scale")
+            lines.append("- **A** = Wire services (Reuters, AP, AFP)")
+            lines.append("- **B** = Major outlets (BBC, NYT, established regional)")
+            lines.append("- **C** = General news sites")
+            lines.append("- **D** = Known bias issues")
+            lines.append("- **E** = Unreliable/propaganda")
+            lines.append("- **F** = Cannot judge")
+            lines.append("")
+
+            if detected_region:
+                region_axes = {
+                    "Taiwan": "china-independence",
+                    "China": "china-independence",
+                    "Hong Kong": "china-independence",
+                    "Ukraine": "russia-west",
+                    "Russia": "russia-west",
+                }
+                axis = region_axes.get(detected_region)
+                if axis:
+                    lines.append(f"### Regional Orientation ({detected_region})")
+                    lines.append(f"For sources covering {detected_region}, also set orientation:")
+                    lines.append(f"- `set_source_orientation(\"domain\", \"<orientation>\", \"{axis}\")`")
+                    lines.append("")
+
+            lines.append("---")
+            lines.append(f"**After analyzing sources, call `briefing(\"{topic}\")` again to get the full report.**")
+
+            return "\n".join(lines)
+
         # Format the result with time_range and source metadata
         formatter = _get_formatter()
         output = formatter.format(

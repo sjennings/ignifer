@@ -129,13 +129,6 @@ class OutputFormatter:
         query = result.query
         timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
-        # SOURCE ANALYSIS INSTRUCTIONS - must be at very start if needed
-        analysis_instructions = self._format_source_analysis_instructions(
-            articles, source_metadata, detected_region
-        )
-        if analysis_instructions:
-            lines.extend(analysis_instructions)
-
         # DIRECTIVE for report
         lines.append("═══════════════════════════════════════════════════════")
         lines.append("PART 2 OF YOUR RESPONSE - INCLUDE THIS ENTIRE REPORT")

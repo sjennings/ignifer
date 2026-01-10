@@ -628,46 +628,6 @@ class TestOutputFormatter:
         assert "china-independence" in output
         assert "set_source_orientation" in output
 
-    def test_format_includes_analysis_instructions_when_needed(self) -> None:
-        """Full format includes source analysis instructions when domains need analysis."""
-        result = OSINTResult(
-            status=ResultStatus.SUCCESS,
-            query="Taiwan news",
-            results=[
-                {"title": "Test Article", "domain": "unanalyzed.tw", "sourcecountry": "Taiwan"}
-            ],
-            sources=[
-                SourceAttribution(
-                    source="gdelt",
-                    quality=QualityTier.MEDIUM,
-                    confidence=ConfidenceLevel.LIKELY,
-                    metadata=SourceMetadata(
-                        source_name="gdelt",
-                        source_url="https://api.gdeltproject.org/...",
-                        retrieved_at=datetime.now(timezone.utc),
-                    ),
-                )
-            ],
-            retrieved_at=datetime.now(timezone.utc),
-        )
-
-        source_metadata = {
-            "unanalyzed.tw": SourceMetadataEntry(
-                domain="unanalyzed.tw",
-                language="Chinese",
-                nation="Taiwan",
-                enrichment_source="auto:gdelt_baseline"  # Needs analysis
-            )
-        }
-
-        formatter = OutputFormatter()
-        output = formatter.format(
-            result,
-            source_metadata=source_metadata,
-            detected_region="Taiwan"
-        )
-
-        assert "MANDATORY: SOURCE QUALITY ANALYSIS REQUIRED" in output
-        assert "unanalyzed.tw" in output
-        assert "Taiwan sources" in output
-        assert "china-independence" in output
+    # NOTE: test_format_includes_analysis_instructions_when_needed was removed
+    # because source analysis logic moved to server.py (returns early with
+    # analysis instructions instead of embedding them in the report)
