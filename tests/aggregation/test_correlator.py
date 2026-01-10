@@ -362,23 +362,28 @@ class TestAggregatedResult:
         assert result.to_confidence_level() == ConfidenceLevel.VERY_LIKELY
 
     def test_to_confidence_level_likely(self) -> None:
-        """to_confidence_level should return LIKELY for 0.60-0.80."""
+        """to_confidence_level should return LIKELY for 0.55-0.80."""
         result = AggregatedResult(query="Test", overall_confidence=0.70)
         assert result.to_confidence_level() == ConfidenceLevel.LIKELY
 
-    def test_to_confidence_level_even_chance(self) -> None:
-        """to_confidence_level should return EVEN_CHANCE for 0.40-0.60."""
+    def test_to_confidence_level_roughly_even(self) -> None:
+        """to_confidence_level should return ROUGHLY_EVEN for 0.45-0.55."""
         result = AggregatedResult(query="Test", overall_confidence=0.50)
-        assert result.to_confidence_level() == ConfidenceLevel.EVEN_CHANCE
+        assert result.to_confidence_level() == ConfidenceLevel.ROUGHLY_EVEN
 
     def test_to_confidence_level_unlikely(self) -> None:
-        """to_confidence_level should return UNLIKELY for 0.20-0.40."""
+        """to_confidence_level should return UNLIKELY for 0.20-0.45."""
         result = AggregatedResult(query="Test", overall_confidence=0.30)
         assert result.to_confidence_level() == ConfidenceLevel.UNLIKELY
 
-    def test_to_confidence_level_remote(self) -> None:
-        """to_confidence_level should return REMOTE for <0.20."""
+    def test_to_confidence_level_very_unlikely(self) -> None:
+        """to_confidence_level should return VERY_UNLIKELY for 0.05-0.20."""
         result = AggregatedResult(query="Test", overall_confidence=0.10)
+        assert result.to_confidence_level() == ConfidenceLevel.VERY_UNLIKELY
+
+    def test_to_confidence_level_remote(self) -> None:
+        """to_confidence_level should return REMOTE for <0.05."""
+        result = AggregatedResult(query="Test", overall_confidence=0.02)
         assert result.to_confidence_level() == ConfidenceLevel.REMOTE
 
         result_zero = AggregatedResult(query="Test", overall_confidence=0.0)
@@ -543,9 +548,7 @@ class TestConcurrentSourceQuerying:
         mock_opensanctions_adapter.query.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_missing_adapter_handled(
-        self, correlator_with_mocks: Correlator
-    ) -> None:
+    async def test_missing_adapter_handled(self, correlator_with_mocks: Correlator) -> None:
         """Missing adapter should be handled gracefully."""
         result = await correlator_with_mocks.aggregate(
             "Test query",
@@ -636,10 +639,7 @@ class TestCorroborationDetection:
         )
 
         # Check corroborated findings (sanctions topic has data from multiple sources)
-        corroborated = [
-            f for f in result.findings
-            if f.status == CorroborationStatus.CORROBORATED
-        ]
+        corroborated = [f for f in result.findings if f.status == CorroborationStatus.CORROBORATED]
         assert len(corroborated) > 0
 
         for finding in corroborated:
@@ -659,29 +659,21 @@ class TestCorroborationDetection:
             sources=["gdelt", "opensanctions", "wikidata"],
         )
 
-        corroborated = [
-            f for f in result.findings
-            if f.status == CorroborationStatus.CORROBORATED
-        ]
+        corroborated = [f for f in result.findings if f.status == CorroborationStatus.CORROBORATED]
 
         for finding in corroborated:
             source_names = {s.source_name for s in finding.sources}
             assert len(source_names) >= 2
 
     @pytest.mark.asyncio
-    async def test_corroboration_boosts_confidence(
-        self, correlator_with_mocks: Correlator
-    ) -> None:
+    async def test_corroboration_boosts_confidence(self, correlator_with_mocks: Correlator) -> None:
         """Corroborated findings should have positive confidence boost."""
         result = await correlator_with_mocks.aggregate(
             "Test query",
             sources=["gdelt", "opensanctions", "wikidata"],
         )
 
-        corroborated = [
-            f for f in result.findings
-            if f.status == CorroborationStatus.CORROBORATED
-        ]
+        corroborated = [f for f in result.findings if f.status == CorroborationStatus.CORROBORATED]
 
         for finding in corroborated:
             assert finding.confidence_boost > 0
@@ -705,8 +697,7 @@ class TestSingleSourceHandling:
         result = await correlator.aggregate("Test query", sources=["gdelt"])
 
         single_source = [
-            f for f in result.findings
-            if f.status == CorroborationStatus.SINGLE_SOURCE
+            f for f in result.findings if f.status == CorroborationStatus.SINGLE_SOURCE
         ]
 
         assert len(single_source) > 0
@@ -757,10 +748,12 @@ class TestConflictDetection:
             QualityTier.HIGH,
             [{"name": "Entity X", "sanctioned": False}],
         )
-        correlator = Correlator(adapters={
-            "opensanctions": adapter_a,
-            "wikidata": adapter_b,
-        })
+        correlator = Correlator(
+            adapters={
+                "opensanctions": adapter_a,
+                "wikidata": adapter_b,
+            }
+        )
 
         result = await correlator.aggregate(
             "Test query",
@@ -786,10 +779,12 @@ class TestConflictDetection:
             QualityTier.MEDIUM,
             [{"name": "Entity", "status": "inactive"}],
         )
-        correlator = Correlator(adapters={
-            "source_a": adapter_a,
-            "source_b": adapter_b,
-        })
+        correlator = Correlator(
+            adapters={
+                "source_a": adapter_a,
+                "source_b": adapter_b,
+            }
+        )
 
         result = await correlator.aggregate(
             "Test query",
@@ -819,10 +814,12 @@ class TestConflictDetection:
             QualityTier.LOW,
             [{"name": "Entity", "sanctioned": False}],
         )
-        correlator = Correlator(adapters={
-            "high_quality": adapter_high,
-            "low_quality": adapter_low,
-        })
+        correlator = Correlator(
+            adapters={
+                "high_quality": adapter_high,
+                "low_quality": adapter_low,
+            }
+        )
 
         result = await correlator.aggregate(
             "Test query",
@@ -845,10 +842,12 @@ class TestConflictDetection:
             QualityTier.MEDIUM,
             [{"name": "Entity", "active": False}],
         )
-        correlator = Correlator(adapters={
-            "source_a": adapter_a,
-            "source_b": adapter_b,
-        })
+        correlator = Correlator(
+            adapters={
+                "source_a": adapter_a,
+                "source_b": adapter_b,
+            }
+        )
 
         result = await correlator.aggregate(
             "Test query",
@@ -884,8 +883,7 @@ class TestConfidenceCalculation:
 
         # With corroborated findings, confidence should be higher
         corroborated_count = sum(
-            1 for f in result.findings
-            if f.status == CorroborationStatus.CORROBORATED
+            1 for f in result.findings if f.status == CorroborationStatus.CORROBORATED
         )
 
         if corroborated_count > 0:
@@ -904,10 +902,12 @@ class TestConfidenceCalculation:
             QualityTier.HIGH,
             [{"name": "Entity", "sanctioned": False, "topic": "test"}],
         )
-        correlator = Correlator(adapters={
-            "source_a": adapter_a,
-            "source_b": adapter_b,
-        })
+        correlator = Correlator(
+            adapters={
+                "source_a": adapter_a,
+                "source_b": adapter_b,
+            }
+        )
 
         result = await correlator.aggregate(
             "Test",
@@ -935,9 +935,7 @@ class TestSourceAttribution:
     """Tests for source attribution."""
 
     @pytest.mark.asyncio
-    async def test_source_attributions_included(
-        self, correlator_with_mocks: Correlator
-    ) -> None:
+    async def test_source_attributions_included(self, correlator_with_mocks: Correlator) -> None:
         """Source attributions should be included in result."""
         result = await correlator_with_mocks.aggregate(
             "Test query",
@@ -964,9 +962,7 @@ class TestSourceAttribution:
             assert attribution.quality_tier in QualityTier
 
     @pytest.mark.asyncio
-    async def test_source_attribution_has_url(
-        self, correlator_with_mocks: Correlator
-    ) -> None:
+    async def test_source_attribution_has_url(self, correlator_with_mocks: Correlator) -> None:
         """Source attributions should include source URL when available."""
         result = await correlator_with_mocks.aggregate(
             "Test query",

@@ -13,6 +13,8 @@ from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from ignifer.models import ConfidenceLevel
+
 if TYPE_CHECKING:
     from ignifer.adapters.wikidata import WikidataAdapter
 
@@ -51,6 +53,7 @@ class EntityMatch(BaseModel):
         original_query: The original search query
         matched_label: The label that matched
         suggestions: Alternative query suggestions (on failure)
+        confidence_factors: List of factors explaining the confidence score
     """
 
     model_config = ConfigDict(
@@ -65,10 +68,35 @@ class EntityMatch(BaseModel):
     original_query: str
     matched_label: str | None = None
     suggestions: list[str] = []
+    confidence_factors: list[str] = Field(default_factory=list)
 
     def is_successful(self) -> bool:
         """Check if resolution was successful."""
         return self.resolution_tier != ResolutionTier.FAILED
+
+    def to_confidence_level(self) -> ConfidenceLevel:
+        """Convert match_confidence float to ConfidenceLevel enum.
+
+        Maps the 0.0-1.0 float to ICD 203 confidence levels based on
+        percentage thresholds.
+
+        Returns:
+            ConfidenceLevel corresponding to the match_confidence value.
+        """
+        if self.match_confidence >= 0.95:
+            return ConfidenceLevel.ALMOST_CERTAIN
+        elif self.match_confidence >= 0.80:
+            return ConfidenceLevel.VERY_LIKELY
+        elif self.match_confidence >= 0.55:
+            return ConfidenceLevel.LIKELY
+        elif self.match_confidence >= 0.45:
+            return ConfidenceLevel.ROUGHLY_EVEN
+        elif self.match_confidence >= 0.20:
+            return ConfidenceLevel.UNLIKELY
+        elif self.match_confidence >= 0.05:
+            return ConfidenceLevel.VERY_UNLIKELY
+        else:
+            return ConfidenceLevel.REMOTE
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to dictionary.
@@ -81,9 +109,11 @@ class EntityMatch(BaseModel):
             "wikidata_qid": self.wikidata_qid,
             "resolution_tier": self.resolution_tier.value,
             "match_confidence": self.match_confidence,
+            "confidence_level": self.to_confidence_level().name,
             "original_query": self.original_query,
             "matched_label": self.matched_label,
             "suggestions": self.suggestions,
+            "confidence_factors": self.confidence_factors,
         }
 
 
@@ -247,6 +277,10 @@ class EntityResolver:
                 match_confidence=1.0,
                 original_query=query,
                 matched_label=entity_info["label"],
+                confidence_factors=[
+                    "Exact match against known entity registry",
+                    "100% string match confidence",
+                ],
             )
         return None
 
@@ -273,6 +307,10 @@ class EntityResolver:
                     match_confidence=0.95,
                     original_query=query,
                     matched_label=entity_info["label"],
+                    confidence_factors=[
+                        "Matched after text normalization (case, whitespace, diacritics)",
+                        "95% confidence due to normalization step",
+                    ],
                 )
         return None
 
@@ -314,6 +352,11 @@ class EntityResolver:
                 match_confidence=0.85,
                 original_query=query,
                 matched_label=str(label) if label else query,
+                confidence_factors=[
+                    "Resolved via Wikidata knowledge graph",
+                    "85% confidence for remote API lookup",
+                    f"Matched Q-ID: {qid}",
+                ],
             )
 
         except Exception as e:
@@ -361,6 +404,11 @@ class EntityResolver:
                 match_confidence=confidence,
                 original_query=query,
                 matched_label=entity_info["label"],
+                confidence_factors=[
+                    f"Fuzzy string matching with {similarity:.0%} similarity",
+                    f"Matched against known entity: {entity_info['label']}",
+                    "Confidence reduced due to inexact match",
+                ],
             )
         return None
 
@@ -414,6 +462,11 @@ class EntityResolver:
             original_query=query,
             matched_label=None,
             suggestions=self._generate_suggestions(query),
+            confidence_factors=[
+                "No match found in known entity registry",
+                "No match found via text normalization",
+                "Fuzzy matching below threshold",
+            ],
         )
 
 

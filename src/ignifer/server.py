@@ -3088,14 +3088,16 @@ FOCUS_SOURCE_BOOST: dict[str, list[str]] = {
     "maritime": ["aisstream", "wikidata", "opensanctions", "gdelt"],
 }
 
-# Confidence level labels for display
+# Confidence level labels for display (ICD 203 compliant)
+# Ranges match ConfidenceLevel.percentage_range from models.py
 CONFIDENCE_LABELS: dict[str, str] = {
-    "ALMOST_CERTAIN": "ALMOST CERTAIN (95%+)",
-    "VERY_LIKELY": "VERY LIKELY (80-94%)",
-    "LIKELY": "LIKELY (60-79%)",
-    "EVEN_CHANCE": "EVEN CHANCE (40-59%)",
-    "UNLIKELY": "UNLIKELY (20-39%)",
-    "REMOTE": "REMOTE (<20%)",
+    "ALMOST_CERTAIN": "ALMOST CERTAIN (95-100%)",
+    "VERY_LIKELY": "VERY LIKELY (80-95%)",
+    "LIKELY": "LIKELY (55-80%)",
+    "ROUGHLY_EVEN": "ROUGHLY EVEN (45-55%)",
+    "UNLIKELY": "UNLIKELY (20-45%)",
+    "VERY_UNLIKELY": "VERY UNLIKELY (5-20%)",
+    "REMOTE": "REMOTE (0-5%)",
 }
 
 
