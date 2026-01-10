@@ -17,6 +17,7 @@ from ignifer.adapters import (
     AdapterTimeoutError,
     AISStreamAdapter,
     GDELTAdapter,
+    OpenSanctionsAdapter,
     OpenSkyAdapter,
     WikidataAdapter,
     WorldBankAdapter,
@@ -45,6 +46,7 @@ _wikidata: WikidataAdapter | None = None
 _opensky: OpenSkyAdapter | None = None
 _aisstream: AISStreamAdapter | None = None
 _acled: ACLEDAdapter | None = None
+_opensanctions: OpenSanctionsAdapter | None = None
 _entity_resolver: EntityResolver | None = None
 _formatter: OutputFormatter | None = None
 
@@ -98,6 +100,13 @@ def _get_acled() -> ACLEDAdapter:
     return _acled
 
 
+def _get_opensanctions() -> OpenSanctionsAdapter:
+    global _opensanctions
+    if _opensanctions is None:
+        _opensanctions = OpenSanctionsAdapter(cache=_get_cache())
+    return _opensanctions
+
+
 def _get_entity_resolver() -> EntityResolver:
     global _entity_resolver
     if _entity_resolver is None:
@@ -114,7 +123,8 @@ def _get_formatter() -> OutputFormatter:
 
 async def _cleanup_resources() -> None:
     """Close all open resources (adapters, cache connections)."""
-    global _adapter, _worldbank, _wikidata, _opensky, _aisstream, _acled, _entity_resolver, _cache
+    global _adapter, _worldbank, _wikidata, _opensky, _aisstream, _acled
+    global _opensanctions, _entity_resolver, _cache
 
     # Clear entity resolver first (it references wikidata adapter)
     _entity_resolver = None
@@ -127,6 +137,7 @@ async def _cleanup_resources() -> None:
         (_opensky, "_opensky"),
         (_aisstream, "_aisstream"),
         (_acled, "_acled"),
+        (_opensanctions, "_opensanctions"),
     ]
     for adapter, name in adapters:
         if adapter is not None:
@@ -2567,6 +2578,450 @@ async def conflict_analysis(
         return (
             f"## Error\n\n"
             f"An unexpected error occurred while analyzing **{region}**.\n\n"
+            f"Please try again later."
+        )
+
+
+# ============================================================================
+# SANCTIONS CHECK TOOL
+# ============================================================================
+
+# Sanctions list name expansion for user-friendly display
+SANCTIONS_LIST_NAMES: dict[str, str] = {
+    "us_ofac_sdn": "US OFAC SDN (Specially Designated Nationals)",
+    "eu_fsf": "EU Financial Sanctions",
+    "un_sc_sanctions": "UN Security Council Sanctions",
+    "gb_hmt_sanctions": "UK HMT (His Majesty's Treasury)",
+    "ch_seco_sanctions": "Swiss SECO",
+    "ua_nsdc": "Ukraine NSDC Sanctions",
+    "au_dfat": "Australia DFAT Sanctions",
+    "ca_sema": "Canada SEMA Sanctions",
+    "jp_mof": "Japan MOF Sanctions",
+}
+
+
+def _expand_sanctions_list(code: str) -> str:
+    """Expand sanctions list code to readable name.
+
+    Args:
+        code: Sanctions list code (e.g., "us_ofac_sdn")
+
+    Returns:
+        Human-readable list name
+    """
+    return SANCTIONS_LIST_NAMES.get(code, code.replace("_", " ").title())
+
+
+def _format_confidence_display(score: float) -> str:
+    """Format match score as percentage with level.
+
+    Args:
+        score: Match score from 0.0 to 1.0
+
+    Returns:
+        Formatted string like "98% (HIGH)"
+    """
+    pct = int(score * 100)
+    if score >= 0.9:
+        level = "HIGH"
+    elif score >= 0.7:
+        level = "MEDIUM"
+    elif score >= 0.5:
+        level = "LOW"
+    else:
+        level = "VERY LOW"
+    return f"{pct}% ({level})"
+
+
+def _format_match_status(entity: dict[str, Any]) -> str:
+    """Determine and format match status string.
+
+    Args:
+        entity: Normalized entity dict from OpenSanctionsAdapter
+
+    Returns:
+        Status string (MATCH, PEP (NOT SANCTIONED), PARTIAL MATCH, NO MATCH)
+    """
+    is_sanctioned = entity.get("is_sanctioned", False)
+    is_pep = entity.get("is_pep", False)
+    match_score = entity.get("match_score", 0.0)
+
+    if is_sanctioned:
+        return "MATCH"
+    elif is_pep:
+        return "PEP (NOT SANCTIONED)"
+    elif match_score >= 0.5:
+        return "PARTIAL MATCH"
+    else:
+        return "NO MATCH"
+
+
+def _format_no_match_message(entity: str, retrieved_at: datetime) -> str:
+    """Format message when no sanctions match found.
+
+    Args:
+        entity: The queried entity name
+        retrieved_at: Timestamp of search
+
+    Returns:
+        Formatted no-match message with suggestions
+    """
+    timestamp = retrieved_at.strftime("%Y-%m-%dT%H:%M:%S+00:00")
+
+    return (
+        f"SANCTIONS SCREENING: {entity.upper()}\n"
+        f"{'=' * 55}\n\n"
+        f"MATCH RESULT: NO MATCH\n"
+        f"Confidence: Comprehensive search completed\n\n"
+        f"SCREENING SUMMARY\n"
+        f"{'-' * 55}\n"
+        f"No matches found in global sanctions databases.\n\n"
+        f"Databases Searched:\n"
+        f"  - US OFAC SDN\n"
+        f"  - EU Financial Sanctions\n"
+        f"  - UN Security Council Sanctions\n"
+        f"  - UK HMT Sanctions\n"
+        f"  - Swiss SECO Sanctions\n"
+        f"  - Various national PEP databases\n\n"
+        f"NOTE: Entity may use aliases not in database. Consider:\n"
+        f"  - Verifying exact legal name\n"
+        f"  - Checking alternative spellings or transliterations\n"
+        f"  - Searching for parent/subsidiary companies\n\n"
+        f"{'-' * 55}\n"
+        f"Sources: OpenSanctions (https://www.opensanctions.org/)\n"
+        f"Data retrieved: {timestamp}\n"
+        f"{'=' * 55}\n"
+    )
+
+
+def _format_partial_match_message(
+    entity_name: str,
+    match: dict[str, Any],
+    retrieved_at: datetime,
+) -> str:
+    """Format message for partial/low-confidence match.
+
+    Args:
+        entity_name: Original query entity name
+        match: Matched entity dict
+        retrieved_at: Timestamp of search
+
+    Returns:
+        Formatted partial match message with verification suggestions
+    """
+    timestamp = retrieved_at.strftime("%Y-%m-%dT%H:%M:%S+00:00")
+    match_score = match.get("match_score", 0.0)
+    caption = match.get("caption", match.get("name", "Unknown"))
+    schema = match.get("schema", "Unknown")
+    confidence = _format_confidence_display(match_score)
+
+    output = f"SANCTIONS SCREENING: {entity_name.upper()}\n"
+    output += "=" * 55 + "\n\n"
+    output += "MATCH RESULT: PARTIAL MATCH\n"
+    output += f"Confidence: {confidence}\n\n"
+
+    output += "POTENTIAL MATCH\n"
+    output += "-" * 55 + "\n"
+    output += f"Name: {caption}\n"
+    output += f"Type: {schema}\n"
+    output += "Match confidence is below threshold for positive identification.\n\n"
+
+    output += "VERIFICATION RECOMMENDED\n"
+    output += "-" * 55 + "\n"
+    output += "The matched entity may be:\n"
+    output += "  - A different entity with a similar name\n"
+    output += "  - The same entity under a different legal name\n"
+    output += "  - A subsidiary or related company\n\n"
+
+    output += "Suggested Actions:\n"
+    output += "  - Verify using official registration documents\n"
+    output += "  - Search with full legal entity name\n"
+    output += "  - Check parent company if applicable\n\n"
+
+    output += "-" * 55 + "\n"
+    output += "Sources: OpenSanctions (https://www.opensanctions.org/)\n"
+    output += f"Data retrieved: {timestamp}\n"
+    output += "=" * 55 + "\n"
+
+    return output
+
+
+def _format_pep_result(
+    entity_name: str,
+    match: dict[str, Any],
+    retrieved_at: datetime,
+) -> str:
+    """Format message for PEP-only entity (FR19).
+
+    Args:
+        entity_name: Original query entity name
+        match: Matched entity dict
+        retrieved_at: Timestamp of search
+
+    Returns:
+        Formatted PEP result with due diligence note
+    """
+    timestamp = retrieved_at.strftime("%Y-%m-%dT%H:%M:%S+00:00")
+    match_score = match.get("match_score", 0.0)
+    caption = match.get("caption", match.get("name", "Unknown"))
+    schema = match.get("schema", "Unknown")
+    confidence = _format_confidence_display(match_score)
+    position = match.get("position", "")
+    nationality = match.get("nationality", "")
+    url = match.get("url", "")
+
+    output = f"SANCTIONS SCREENING: {entity_name.upper()}\n"
+    output += "=" * 55 + "\n\n"
+    output += "MATCH RESULT: PEP (NOT SANCTIONED)\n"
+    output += f"Confidence: {confidence}\n\n"
+
+    output += "ENTITY INFORMATION\n"
+    output += "-" * 55 + "\n"
+    output += f"Type: {schema}\n"
+    output += f"Full Name: {caption}\n"
+    if position:
+        output += f"Position: {position}\n"
+    if nationality:
+        output += f"Nationality: {nationality}\n"
+    output += "\n"
+
+    output += "PEP STATUS (FR19)\n"
+    output += "-" * 55 + "\n"
+    output += "Politically Exposed Person: YES\n"
+    output += "Currently Sanctioned: NO\n"
+    if position:
+        output += f"Position: {position}\n"
+    output += "\n"
+
+    output += "NOTE: Enhanced due diligence recommended for Politically Exposed\n"
+    output += "Persons even when not currently sanctioned.\n\n"
+
+    if url:
+        output += "CROSS-REFERENCES\n"
+        output += "-" * 55 + "\n"
+        output += f"OpenSanctions: {url}\n\n"
+
+    output += "-" * 55 + "\n"
+    output += "Sources: OpenSanctions (https://www.opensanctions.org/)\n"
+    output += f"Data retrieved: {timestamp}\n"
+    output += "=" * 55 + "\n"
+
+    return output
+
+
+def _format_sanctions_result(
+    entity_name: str,
+    match: dict[str, Any],
+    retrieved_at: datetime,
+) -> str:
+    """Format message for sanctioned entity.
+
+    Args:
+        entity_name: Original query entity name
+        match: Matched entity dict
+        retrieved_at: Timestamp of search
+
+    Returns:
+        Formatted sanctions match result
+    """
+    timestamp = retrieved_at.strftime("%Y-%m-%dT%H:%M:%S+00:00")
+    match_score = match.get("match_score", 0.0)
+    caption = match.get("caption", match.get("name", "Unknown"))
+    schema = match.get("schema", "Unknown")
+    confidence = _format_confidence_display(match_score)
+    aliases = match.get("aliases", "")
+    nationality = match.get("nationality", "")
+    position = match.get("position", "")
+    sanctions_lists_raw = match.get("sanctions_lists", "")
+    first_seen = match.get("first_seen", "N/A")
+    last_seen = match.get("last_seen", "N/A")
+    url = match.get("url", "")
+    entity_id = match.get("entity_id", "")
+    is_pep = match.get("is_pep", False)
+
+    output = f"SANCTIONS SCREENING: {entity_name.upper()}\n"
+    output += "=" * 55 + "\n\n"
+    output += "MATCH RESULT: MATCH\n"
+    output += f"Confidence: {confidence}\n\n"
+
+    # Entity information section
+    output += "ENTITY INFORMATION\n"
+    output += "-" * 55 + "\n"
+    output += f"Type: {schema}\n"
+    output += f"Full Name: {caption}\n"
+    if aliases:
+        output += f"Aliases: {aliases}\n"
+    if nationality:
+        output += f"Nationality: {nationality}\n"
+    if position:
+        output += f"Position: {position}\n"
+    output += "\n"
+
+    # Sanctions status section
+    output += "SANCTIONS STATUS\n"
+    output += "-" * 55 + "\n"
+    output += "Currently Sanctioned: YES\n"
+
+    # Parse and format sanctions lists
+    if sanctions_lists_raw:
+        sanctions_list = [s.strip() for s in str(sanctions_lists_raw).split(",") if s.strip()]
+        if sanctions_list:
+            output += "Sanctions Lists:\n"
+            for sl in sanctions_list:
+                expanded = _expand_sanctions_list(sl)
+                output += f"  - {expanded}\n"
+    output += "\n"
+
+    # Dates section
+    if first_seen and first_seen != "N/A":
+        output += f"First Sanctioned: {first_seen}\n"
+    if last_seen and last_seen != "N/A":
+        output += f"Last Updated: {last_seen}\n"
+    output += "\n"
+
+    # PEP status if applicable
+    if is_pep:
+        output += "PEP STATUS\n"
+        output += "-" * 55 + "\n"
+        output += "Also a Politically Exposed Person: YES\n\n"
+
+    # Associated entities (referents)
+    referents = match.get("referents", "")
+    if referents:
+        output += "ASSOCIATED ENTITIES\n"
+        output += "-" * 55 + "\n"
+        referent_list = [r.strip() for r in str(referents).split(",") if r.strip()]
+        for referent in referent_list:
+            output += f"  - {referent}\n"
+        output += "\n"
+
+    # Cross-references
+    if url or entity_id:
+        output += "CROSS-REFERENCES\n"
+        output += "-" * 55 + "\n"
+        if entity_id:
+            output += f"OpenSanctions ID: {entity_id}\n"
+        if url:
+            output += f"OpenSanctions: {url}\n"
+        output += "\n"
+
+    # Footer
+    output += "-" * 55 + "\n"
+    output += "Sources: OpenSanctions (https://www.opensanctions.org/)\n"
+    output += f"Data retrieved: {timestamp}\n"
+    output += "=" * 55 + "\n"
+
+    return output
+
+
+def _format_sanctions_check_result(
+    result: Any,  # OSINTResult
+    entity_name: str,
+) -> str:
+    """Main formatter for sanctions check results.
+
+    Args:
+        result: OSINTResult from OpenSanctionsAdapter
+        entity_name: Original query entity name
+
+    Returns:
+        Formatted sanctions screening result
+    """
+    if not result.results:
+        return _format_no_match_message(entity_name, result.retrieved_at)
+
+    # Get the top match
+    match = result.results[0]
+    match_status = _format_match_status(match)
+
+    if match_status == "MATCH":
+        return _format_sanctions_result(entity_name, match, result.retrieved_at)
+    elif match_status == "PEP (NOT SANCTIONED)":
+        return _format_pep_result(entity_name, match, result.retrieved_at)
+    elif match_status == "PARTIAL MATCH":
+        return _format_partial_match_message(entity_name, match, result.retrieved_at)
+    else:
+        return _format_no_match_message(entity_name, result.retrieved_at)
+
+
+@mcp.tool()
+async def sanctions_check(entity: str) -> str:
+    """Screen any entity against global sanctions lists.
+
+    Check persons, companies, vessels, or other entities against OFAC, EU,
+    UN, and other international sanctions lists. Also detects Politically
+    Exposed Persons (PEPs).
+
+    Args:
+        entity: Entity name to screen (person, company, vessel, etc.)
+                Examples: "Rosneft", "Alisher Usmanov", "Akademik Cherskiy"
+
+    Returns:
+        Formatted sanctions screening results with match status,
+        sanctions lists, PEP status, and associated entities.
+        Or helpful error message if screening fails.
+    """
+    # Input validation
+    if not entity or not entity.strip():
+        return (
+            "## Invalid Entity\n\n"
+            "Please provide an entity name to screen.\n\n"
+            "**Examples:**\n"
+            "- Company: Rosneft, Gazprom, Huawei\n"
+            "- Person: Viktor Vekselberg, Alisher Usmanov\n"
+            "- Vessel: Akademik Cherskiy"
+        )
+
+    entity_cleaned = entity.strip()
+    logger.info(f"Sanctions check requested for: {entity_cleaned}")
+
+    try:
+        adapter = _get_opensanctions()
+        result = await adapter.search_entity(entity_cleaned)
+
+        # Handle expected operational states via Result type
+        if result.status == ResultStatus.NO_DATA:
+            return _format_no_match_message(entity_cleaned, result.retrieved_at)
+
+        if result.status == ResultStatus.RATE_LIMITED:
+            return (
+                "## Rate Limited\n\n"
+                "OpenSanctions API rate limit reached. Please try again later.\n\n"
+                "**Suggestions:**\n"
+                "- Wait a few minutes before trying again\n"
+                "- OpenSanctions has API rate limits for free usage"
+            )
+
+        # Success - format the output
+        return _format_sanctions_check_result(result, entity_cleaned)
+
+    except AdapterTimeoutError as e:
+        logger.warning(f"Timeout screening {entity_cleaned}: {e}")
+        return (
+            f"## Request Timed Out\n\n"
+            f"OpenSanctions API timed out while screening **{entity_cleaned}**.\n\n"
+            f"**Suggestions:**\n"
+            f"- Try again in a moment\n"
+            f"- Check your network connection\n"
+            f"- OpenSanctions API may be experiencing high load"
+        )
+
+    except AdapterError as e:
+        logger.error(f"Adapter error screening {entity_cleaned}: {e}")
+        return (
+            f"## Unable to Retrieve Data\n\n"
+            f"Could not screen **{entity_cleaned}** against sanctions lists.\n\n"
+            f"**What happened:** {e.message}\n\n"
+            f"**Suggestions:**\n"
+            f"- Try again in a few moments\n"
+            f"- Verify the entity name"
+        )
+
+    except Exception as e:
+        logger.exception(f"Unexpected error screening {entity_cleaned}: {e}")
+        return (
+            f"## Error\n\n"
+            f"An unexpected error occurred while screening **{entity_cleaned}**.\n\n"
             f"Please try again later."
         )
 
