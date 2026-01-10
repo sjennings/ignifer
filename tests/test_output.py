@@ -598,13 +598,12 @@ class TestOutputFormatter:
 
         # Check structure
         output = "\n".join(result)
-        assert "SOURCE QUALITY ANALYSIS NEEDED" in output
-        assert "2 sources need reliability assessment." in output
-        assert "UNANALYZED SOURCES" in output
+        assert "MANDATORY: SOURCE QUALITY ANALYSIS REQUIRED" in output
+        assert "you MUST analyze 2 sources" in output
+        assert "ACTION REQUIRED" in output
         assert "news1.com" in output
-        assert "2 articles" in output  # news1.com has 2 articles
-        assert "Taiwan" in output
-        assert "RELIABILITY SCALE" in output
+        assert "WebSearch" in output
+        assert "RELIABILITY GRADES" in output
         assert "set_source_reliability" in output
 
     def test_format_source_analysis_instructions_includes_regional_axis(self) -> None:
@@ -625,10 +624,9 @@ class TestOutputFormatter:
         )
 
         output = "\n".join(result)
-        assert "REGIONAL AXIS HINT" in output
+        assert "Taiwan sources" in output
         assert "china-independence" in output
-        assert "Pro-unification" in output
-        assert "Pro-independence" in output
+        assert "set_source_orientation" in output
 
     def test_format_includes_analysis_instructions_when_needed(self) -> None:
         """Full format includes source analysis instructions when domains need analysis."""
@@ -669,6 +667,7 @@ class TestOutputFormatter:
             detected_region="Taiwan"
         )
 
-        assert "SOURCE QUALITY ANALYSIS NEEDED" in output
+        assert "MANDATORY: SOURCE QUALITY ANALYSIS REQUIRED" in output
         assert "unanalyzed.tw" in output
-        assert "REGIONAL AXIS HINT" in output
+        assert "Taiwan sources" in output
+        assert "china-independence" in output

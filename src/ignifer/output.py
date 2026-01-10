@@ -129,7 +129,14 @@ class OutputFormatter:
         query = result.query
         timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
-        # DIRECTIVE - must be at very start
+        # SOURCE ANALYSIS INSTRUCTIONS - must be at very start if needed
+        analysis_instructions = self._format_source_analysis_instructions(
+            articles, source_metadata, detected_region
+        )
+        if analysis_instructions:
+            lines.extend(analysis_instructions)
+
+        # DIRECTIVE for report
         lines.append("═══════════════════════════════════════════════════════")
         lines.append("PART 2 OF YOUR RESPONSE - INCLUDE THIS ENTIRE REPORT")
         lines.append("(Your Part 1 executive summary should appear above this)")
@@ -324,13 +331,6 @@ class OutputFormatter:
                 if len(orientation_notes) > 5:
                     lines.append(f"  *...and {len(orientation_notes) - 5} more*")
                 lines.append("")
-
-        # Source Quality Analysis instructions (for Claude to use WebSearch)
-        analysis_instructions = self._format_source_analysis_instructions(
-            articles, source_metadata, detected_region
-        )
-        if analysis_instructions:
-            lines.extend(analysis_instructions)
 
         # Regional supplementation instruction for Claude (WebSearch)
         if detected_region and query_param:
@@ -907,60 +907,53 @@ class OutputFormatter:
             return []
 
         lines = []
-        lines.append("")
-        lines.append("═══════════════════════════════════════════════════════")
-        lines.append("           SOURCE QUALITY ANALYSIS NEEDED              ")
-        lines.append("═══════════════════════════════════════════════════════")
-        lines.append("")
         num_domains = len(domains_to_analyze)
-        lines.append(f"{num_domains} sources need reliability assessment.")
-        lines.append("For each domain, use WebSearch to research media bias.")
-        lines.append("")
-        lines.append("UNANALYZED SOURCES (sorted by frequency):")
 
-        for i, (domain, nation, language, article_count) in enumerate(domains_to_analyze, 1):
+        lines.append("")
+        lines.append("╔═══════════════════════════════════════════════════════╗")
+        lines.append("║     ⚠️  MANDATORY: SOURCE QUALITY ANALYSIS REQUIRED    ║")
+        lines.append("╚═══════════════════════════════════════════════════════╝")
+        lines.append("")
+        lines.append(f"STOP! Before providing your response, you MUST analyze {num_domains} sources.")
+        lines.append("This is NOT optional. Complete ALL steps below FIRST.")
+        lines.append("")
+        lines.append("ACTION REQUIRED - Do this NOW:")
+        lines.append("")
+
+        # Limit to top 5 for immediate action, show count of others
+        top_domains = domains_to_analyze[:5]
+        for i, (domain, nation, language, article_count) in enumerate(top_domains, 1):
             nation_str = nation if nation else "Unknown"
-            lang_str = f", {language}" if language else ""
-            plural = "s" if article_count > 1 else ""
-            meta = f"({nation_str}{lang_str})"
-            lines.append(f"  {i}. {domain} {meta} - {article_count} article{plural}")
+            lines.append(f"  {i}. WebSearch: \"{domain} media bias reliability\"")
+            lines.append(f"     Then call: set_source_reliability(\"{domain}\", \"<A-F>\")")
+            lines.append("")
 
-        lines.append("")
-        lines.append("ANALYSIS WORKFLOW:")
-        lines.append("For each source, search \"[domain] media bias rating\" and determine:")
-        lines.append("  • Reliability grade (A-F scale)")
-        lines.append("  • Political orientation (if known)")
-        lines.append("")
-        lines.append("Then call the MCP tools:")
-        lines.append("  set_source_reliability(\"domain.com\", \"B\")")
-        lines.append("  set_source_orientation(\"domain.com\", \"Center-left\", \"left-right\")")
-        lines.append("")
-        lines.append("RELIABILITY SCALE:")
-        lines.append("  A = Completely reliable (wire services, major outlets)")
-        lines.append("  B = Usually reliable (established regional media)")
-        lines.append("  C = Fairly reliable (general news sites)")
-        lines.append("  D = Not usually reliable (known bias issues)")
-        lines.append("  E = Unreliable (propaganda, disinformation)")
-        lines.append("  F = Cannot be judged")
+        if num_domains > 5:
+            lines.append(f"  ... plus {num_domains - 5} more sources to analyze after these.")
+            lines.append("")
+
+        lines.append("RELIABILITY GRADES:")
+        lines.append("  A=Wire services  B=Major outlets  C=Regional media")
+        lines.append("  D=Known bias  E=Unreliable  F=Cannot judge")
         lines.append("")
 
         # Add region-specific axis hint
         if detected_region:
             region_axes = {
-                "Taiwan": "china-independence (Pro-unification ↔ Pro-independence)",
-                "China": "china-independence (Pro-Beijing ↔ Pro-independence)",
-                "Hong Kong": "china-independence (Pro-Beijing ↔ Pro-democracy)",
-                "Ukraine": "russia-west (Pro-Russia ↔ Pro-West)",
-                "Russia": "russia-west (Pro-Kremlin ↔ Pro-West)",
+                "Taiwan": "china-independence",
+                "China": "china-independence",
+                "Hong Kong": "china-independence",
+                "Ukraine": "russia-west",
+                "Russia": "russia-west",
             }
             axis_hint = region_axes.get(detected_region)
             if axis_hint:
-                lines.append(f"REGIONAL AXIS HINT: {axis_hint}")
+                lines.append(f"For {detected_region} sources, also set orientation axis: {axis_hint}")
+                lines.append("  set_source_orientation(\"domain\", \"<orientation>\", \"{}\")".format(axis_hint))
                 lines.append("")
 
-        lines.append("After analysis, subsequent briefings will use these ratings")
-        lines.append("to prioritize higher-quality sources.")
-        lines.append("═══════════════════════════════════════════════════════")
+        lines.append("After completing source analysis, provide the intelligence report below.")
+        lines.append("─" * 55)
         lines.append("")
 
         return lines
