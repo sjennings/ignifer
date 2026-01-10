@@ -36,9 +36,21 @@ from ignifer.aggregation.relevance import (
     SourceRelevanceEngine,
 )
 from ignifer.cache import CacheManager
+from ignifer.confidence import (
+    ConfidenceCalculator,
+    confidence_to_language,
+)
 from ignifer.config import configure_logging, get_settings
-from ignifer.models import QueryParams, ResultStatus
+from ignifer.models import QualityTier, QueryParams, ResultStatus, SourceMetadata
 from ignifer.output import OutputFormatter
+from ignifer.rigor import (
+    format_analytical_caveats,
+    format_bibliography,
+    format_entity_match_confidence,
+    format_sanctions_match_confidence,
+    format_source_attribution,
+    resolve_rigor_mode,
+)
 from ignifer.timeparse import parse_time_range
 
 logger = logging.getLogger(__name__)
@@ -347,7 +359,11 @@ async def _auto_extract_articles(
 
 
 @mcp.tool()
-async def briefing(topic: str, time_range: str | None = None) -> str:
+async def briefing(
+    topic: str,
+    time_range: str | None = None,
+    rigor: bool | None = None,
+) -> str:
     """OSINT intelligence briefing from 65+ language sources.
 
     YOUR RESPONSE MUST HAVE TWO PARTS:
@@ -371,11 +387,18 @@ async def briefing(topic: str, time_range: str | None = None) -> str:
             - "this week", "last week"
             - "2026-01-01 to 2026-01-08" (ISO date range)
             If not specified, defaults to last 7 days.
+        rigor: Enable rigor mode for IC-standard output with full source
+            attribution, confidence levels, and bibliography. If not specified,
+            uses global IGNIFER_RIGOR_MODE setting.
 
     Returns:
         Full briefing + article extracts. Include ALL of it in Part 2.
+        In rigor mode, includes ICD 203 confidence language and bibliography.
     """
-    logger.info(f"Briefing requested for topic: {topic}, time_range: {time_range}")
+    effective_rigor = resolve_rigor_mode(rigor)
+    logger.info(
+        f"Briefing requested: topic={topic}, time_range={time_range}, rigor={effective_rigor}"
+    )
 
     # Validate time_range if provided
     if time_range:
@@ -412,10 +435,10 @@ async def briefing(topic: str, time_range: str | None = None) -> str:
 
             if extracts:
                 output += "\n\n"
-                output += "═" * 55 + "\n"
+                output += "=" * 55 + "\n"
                 output += f"{'PRIMARY SOURCE EXTRACTS':^55}\n"
                 output += "(MANDATORY - INCLUDE ALL ARTICLES BELOW)\n"
-                output += "═" * 55 + "\n\n"
+                output += "=" * 55 + "\n\n"
 
                 for i, ext in enumerate(extracts, 1):
                     lang_val = ext.get("language", "")
@@ -432,7 +455,46 @@ async def briefing(topic: str, time_range: str | None = None) -> str:
                     else:
                         output += f"*[Extraction failed: {ext.get('error', 'Unknown error')}]*\n"
 
-                    output += "\n" + "─" * 55 + "\n\n"
+                    output += "\n" + "-" * 55 + "\n\n"
+
+        # Add rigor mode enhancements if enabled
+        if effective_rigor and result.sources:
+            # Build source metadata list
+            sources = [s.metadata for s in result.sources if s.metadata]
+
+            # Calculate confidence from sources
+            quality_tiers = [s.quality for s in result.sources]
+            calculator = ConfidenceCalculator()
+            confidence = calculator.calculate_from_sources(quality_tiers)
+
+            # Add rigor footer
+            output += "\n" + "=" * 59 + "\n"
+            output += "RIGOR MODE ANALYSIS\n"
+            output += "=" * 59 + "\n\n"
+
+            # Confidence statement
+            output += "## Confidence Assessment\n\n"
+            output += (
+                confidence_to_language(
+                    confidence.level,
+                    f"the information in this briefing regarding {topic} is accurate",
+                )
+                + "\n\n"
+            )
+
+            # Source attribution
+            output += format_source_attribution(sources, include_quality=True)
+
+            # Analytical caveats
+            output += "\n"
+            output += format_analytical_caveats(
+                caveats=["GDELT may not capture all sources in all languages."],
+                source_names=["gdelt"],
+            )
+
+            # Bibliography
+            output += "\n"
+            output += format_bibliography(sources)
 
         logger.info(f"Briefing completed for topic: {topic}")
         return output
@@ -711,7 +773,10 @@ def _format_indicator_section(
 
 
 @mcp.tool()
-async def economic_context(country: str) -> str:
+async def economic_context(
+    country: str,
+    rigor: bool | None = None,
+) -> str:
     """Get comprehensive economic analysis for any country.
 
     Returns economic indicators organized by E-series analysis categories:
@@ -725,11 +790,16 @@ async def economic_context(country: str) -> str:
 
     Args:
         country: Country name (e.g., "Germany", "Japan") or ISO code (e.g., "DEU", "JPN")
+        rigor: Enable rigor mode for IC-standard output with full source
+            attribution, confidence levels, and bibliography. If not specified,
+            uses global IGNIFER_RIGOR_MODE setting.
 
     Returns:
         Formatted economic analysis with source attribution.
+        In rigor mode, includes ICD 203 confidence language and bibliography.
     """
-    logger.info(f"Economic context requested for: {country}")
+    effective_rigor = resolve_rigor_mode(rigor)
+    logger.info(f"Economic context requested for: {country}, rigor: {effective_rigor}")
 
     # Build flat list of all indicators for querying
     all_indicator_defs = (
@@ -856,11 +926,58 @@ async def economic_context(country: str) -> str:
                     output += f"  \u2022 {title}\n"
 
         # Footer
-        output += "\n" + "\u2500" * 59 + "\n"
+        output += "\n" + "-" * 59 + "\n"
         output += f"Sources: {', '.join(sources_used)}\n"
-        retrieved_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        retrieved_at_dt = datetime.now(timezone.utc)
+        retrieved_at = retrieved_at_dt.strftime("%Y-%m-%d %H:%M UTC")
         output += f"Retrieved: {retrieved_at}\n"
-        output += "\u2550" * 59 + "\n"
+        output += "=" * 59 + "\n"
+
+        # Add rigor mode enhancements if enabled
+        if effective_rigor:
+            # Build source metadata
+            source_names_lower = [s.lower() for s in sources_used]
+            sources: list[SourceMetadata] = []
+            for name in source_names_lower:
+                if name == "world bank open data":
+                    url = f"https://api.worldbank.org/v2/country/{country}"
+                else:
+                    url = f"https://{name.replace(' ', '-')}.org/"
+                sources.append(
+                    SourceMetadata(
+                        source_name=name,
+                        source_url=url,
+                        retrieved_at=retrieved_at_dt,
+                    )
+                )
+
+            # Calculate confidence
+            quality_tiers = [QualityTier.HIGH] * len(sources)  # World Bank is high quality
+            calculator = ConfidenceCalculator()
+            confidence = calculator.calculate_from_sources(quality_tiers)
+
+            output += "\n" + "=" * 59 + "\n"
+            output += "RIGOR MODE ANALYSIS\n"
+            output += "=" * 59 + "\n\n"
+
+            # Confidence statement
+            output += "## Confidence Assessment\n\n"
+            output += (
+                confidence_to_language(
+                    confidence.level,
+                    f"the economic data for {country_name} is accurate",
+                )
+                + "\n\n"
+            )
+
+            # Analytical caveats
+            output += format_analytical_caveats(
+                source_names=source_names_lower,
+            )
+
+            # Bibliography
+            output += "\n"
+            output += format_bibliography(sources)
 
         logger.info(f"Economic context completed for: {country}")
         return output
@@ -907,6 +1024,7 @@ def _format_entity_output(
     entity_data: dict[str, Any],
     resolution_tier: str,
     confidence: float,
+    rigor_mode: bool = False,
 ) -> str:
     """Format entity data for user-friendly output.
 
@@ -914,6 +1032,7 @@ def _format_entity_output(
         entity_data: Entity information from WikidataAdapter
         resolution_tier: How the entity was resolved (exact, normalized, etc.)
         confidence: Confidence score of the resolution (0.0 to 1.0)
+        rigor_mode: If True, include explicit match confidence (FR31)
 
     Returns:
         Formatted string with entity intelligence
@@ -924,6 +1043,7 @@ def _format_entity_output(
     description = entity_data.get("description", "")
     aliases = entity_data.get("aliases", "")
     url = entity_data.get("url", f"https://www.wikidata.org/wiki/{qid}")
+    retrieved_at_dt = datetime.now(timezone.utc)
 
     # Format entity type from instance_of
     instance_of = entity_data.get("instance_of", "")
@@ -975,9 +1095,45 @@ def _format_entity_output(
     output += "\n" + "-" * 55 + "\n"
     output += f"Resolution: {resolution_tier} (confidence: {confidence:.2f})\n"
     output += "Source: Wikidata\n"
-    retrieved_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    retrieved_at = retrieved_at_dt.strftime("%Y-%m-%d %H:%M UTC")
     output += f"Retrieved: {retrieved_at}\n"
     output += "=" * 55 + "\n"
+
+    # Add rigor mode enhancements (FR31)
+    if rigor_mode:
+        output += "\n" + "=" * 59 + "\n"
+        output += "RIGOR MODE ANALYSIS\n"
+        output += "=" * 59 + "\n\n"
+
+        # Explicit match confidence (FR31)
+        output += "## Match Confidence\n\n"
+        output += (
+            format_entity_match_confidence(
+                confidence_score=confidence,
+                resolution_tier=resolution_tier,
+                wikidata_qid=qid,
+                match_factors=[
+                    f"Resolution method: {resolution_tier}",
+                    f"Wikidata entity found: {qid}",
+                    "Entity type verified" if entity_type != "Entity" else "Entity type unknown",
+                ],
+            )
+            + "\n\n"
+        )
+
+        # Source metadata
+        source = SourceMetadata(
+            source_name="wikidata",
+            source_url=url,
+            retrieved_at=retrieved_at_dt,
+        )
+
+        # Analytical caveats
+        output += format_analytical_caveats(source_names=["wikidata"])
+
+        # Bibliography
+        output += "\n"
+        output += format_bibliography([source])
 
     return output
 
@@ -1047,7 +1203,11 @@ def _format_resolution_failure(
 
 
 @mcp.tool()
-async def entity_lookup(name: str = "", identifier: str = "") -> str:
+async def entity_lookup(
+    name: str = "",
+    identifier: str = "",
+    rigor: bool | None = None,
+) -> str:
     """Look up any entity and get comprehensive intelligence.
 
     Use this tool to research people, organizations, companies, places, or things.
@@ -1058,12 +1218,19 @@ async def entity_lookup(name: str = "", identifier: str = "") -> str:
         name: Entity name to look up (e.g., "Gazprom", "Vladimir Putin", "NATO")
         identifier: Optional Wikidata Q-ID for direct lookup (e.g., "Q102673")
             Use this when you know the exact entity Q-ID for precise results.
+        rigor: Enable rigor mode for IC-standard output with explicit match
+            confidence percentages and full source attribution. If not specified,
+            uses global IGNIFER_RIGOR_MODE setting.
 
     Returns:
         Formatted entity intelligence with source attribution, or
         disambiguation list if multiple matches found.
+        In rigor mode, includes explicit match confidence percentages.
     """
-    logger.info(f"Entity lookup requested: name='{name}', identifier='{identifier}'")
+    effective_rigor = resolve_rigor_mode(rigor)
+    logger.info(
+        f"Entity lookup requested: name='{name}', id='{identifier}', rigor={effective_rigor}"
+    )
 
     # Normalize inputs - strip whitespace
     name = name.strip() if name else ""
@@ -1107,6 +1274,7 @@ async def entity_lookup(name: str = "", identifier: str = "") -> str:
                 entity_data,
                 resolution_tier="direct Q-ID lookup",
                 confidence=1.0,
+                rigor_mode=effective_rigor,
             )
 
         # Name-based lookup - use EntityResolver first
@@ -1135,6 +1303,7 @@ async def entity_lookup(name: str = "", identifier: str = "") -> str:
                     entity_data,
                     resolution_tier=resolution.resolution_tier.value,
                     confidence=resolution.match_confidence,
+                    rigor_mode=effective_rigor,
                 )
 
         # If we have a resolution but no Q-ID or lookup failed,
@@ -1167,6 +1336,7 @@ async def entity_lookup(name: str = "", identifier: str = "") -> str:
                     detail_result.results[0],
                     resolution_tier=resolution.resolution_tier.value,
                     confidence=resolution.match_confidence,
+                    rigor_mode=effective_rigor,
                 )
 
         # Fallback to search result
@@ -1174,6 +1344,7 @@ async def entity_lookup(name: str = "", identifier: str = "") -> str:
             search_result.results[0],
             resolution_tier=resolution.resolution_tier.value,
             confidence=resolution.match_confidence,
+            rigor_mode=effective_rigor,
         )
 
     except AdapterTimeoutError as e:
@@ -1393,10 +1564,12 @@ def _analyze_track_coverage(
         if prev_ts is not None and curr_ts is not None:
             gap_seconds = curr_ts - prev_ts
             if gap_seconds > gap_threshold:
-                gaps.append((
-                    _format_timestamp(prev_ts),
-                    _format_timestamp(curr_ts),
-                ))
+                gaps.append(
+                    (
+                        _format_timestamp(prev_ts),
+                        _format_timestamp(curr_ts),
+                    )
+                )
 
     # Assess coverage quality
     if not gaps:
@@ -1414,6 +1587,7 @@ def _format_flight_output(
     state: dict[str, Any] | None,
     track_waypoints: list[dict[str, Any]],
     retrieved_at: datetime,
+    rigor_mode: bool = False,
 ) -> str:
     """Format flight tracking data for user-friendly output.
 
@@ -1422,6 +1596,7 @@ def _format_flight_output(
         state: Current aircraft state dict, or None if not broadcasting
         track_waypoints: List of track waypoints
         retrieved_at: When data was retrieved
+        rigor_mode: If True, add full source attribution and caveats
 
     Returns:
         Formatted string with flight tracking information
@@ -1509,6 +1684,39 @@ def _format_flight_output(
     output += f"Source: OpenSky Network (retrieved {timestamp_str})\n"
     output += "=" * 55 + "\n"
 
+    # Add rigor mode enhancements
+    if rigor_mode:
+        output += "\n" + "=" * 59 + "\n"
+        output += "RIGOR MODE ANALYSIS\n"
+        output += "=" * 59 + "\n\n"
+
+        # Source metadata
+        source = SourceMetadata(
+            source_name="opensky",
+            source_url="https://opensky-network.org/api",
+            retrieved_at=retrieved_at,
+        )
+
+        # Confidence - based on data freshness
+        calculator = ConfidenceCalculator()
+        confidence = calculator.calculate_from_sources([QualityTier.MEDIUM])
+
+        output += "## Confidence Assessment\n\n"
+        output += (
+            confidence_to_language(
+                confidence.level,
+                f"the position data for {identifier.upper()} is accurate",
+            )
+            + "\n\n"
+        )
+
+        # Analytical caveats
+        output += format_analytical_caveats(source_names=["opensky"])
+
+        # Bibliography
+        output += "\n"
+        output += format_bibliography([source])
+
     return output
 
 
@@ -1541,7 +1749,10 @@ def _format_credentials_error() -> str:
 
 
 @mcp.tool()
-async def track_flight(identifier: str) -> str:
+async def track_flight(
+    identifier: str,
+    rigor: bool | None = None,
+) -> str:
     """Track any aircraft by callsign, tail number, or ICAO24 code.
 
     Returns current position, aircraft info, and 24-hour track history
@@ -1552,10 +1763,14 @@ async def track_flight(identifier: str) -> str:
             - Callsign: "UAL123", "BAW456" (airline code + flight number)
             - Tail number: "N12345" (US), "G-ABCD" (UK), etc.
             - ICAO24: "abc123" (6 hex chars, transponder address)
+        rigor: Enable rigor mode for IC-standard output with full source
+            attribution, confidence levels, and bibliography. If not specified,
+            uses global IGNIFER_RIGOR_MODE setting.
 
     Returns:
         Formatted flight tracking report including position, heading,
         speed, and track history. Or helpful error if not found.
+        In rigor mode, includes full source attribution and caveats.
 
     Note:
         ADS-B coverage varies by region. Aircraft may not be visible when:
@@ -1563,6 +1778,7 @@ async def track_flight(identifier: str) -> str:
         - On the ground with transponder off
         - Flying under ADS-B mandate altitude
     """
+    effective_rigor = resolve_rigor_mode(rigor)
     # Validate identifier is not empty
     if not identifier or not identifier.strip():
         return (
@@ -1676,6 +1892,7 @@ async def track_flight(identifier: str) -> str:
             state=state,
             track_waypoints=track_waypoints,
             retrieved_at=retrieved_at,
+            rigor_mode=effective_rigor,
         )
 
     except AdapterAuthError:
@@ -1982,6 +2199,7 @@ def _format_vessel_output(
     identifier: str,
     position_data: dict[str, Any] | None,
     retrieved_at: datetime,
+    rigor_mode: bool = False,
 ) -> str:
     """Format vessel tracking data for user-friendly output.
 
@@ -1989,6 +2207,7 @@ def _format_vessel_output(
         identifier: Original identifier provided by user
         position_data: Vessel position dict from AISStreamAdapter, or None
         retrieved_at: When data was retrieved
+        rigor_mode: If True, add full source attribution and caveats
 
     Returns:
         Formatted string with vessel tracking information
@@ -2072,6 +2291,39 @@ def _format_vessel_output(
     output += f"Source: AISStream (retrieved {timestamp_str})\n"
     output += "=" * 55 + "\n"
 
+    # Add rigor mode enhancements
+    if rigor_mode:
+        output += "\n" + "=" * 59 + "\n"
+        output += "RIGOR MODE ANALYSIS\n"
+        output += "=" * 59 + "\n\n"
+
+        # Source metadata
+        source = SourceMetadata(
+            source_name="aisstream",
+            source_url="https://aisstream.io/",
+            retrieved_at=retrieved_at,
+        )
+
+        # Confidence
+        calculator = ConfidenceCalculator()
+        confidence = calculator.calculate_from_sources([QualityTier.MEDIUM])
+
+        output += "## Confidence Assessment\n\n"
+        output += (
+            confidence_to_language(
+                confidence.level,
+                f"the position data for {identifier.upper()} is accurate",
+            )
+            + "\n\n"
+        )
+
+        # Analytical caveats
+        output += format_analytical_caveats(source_names=["aisstream"])
+
+        # Bibliography
+        output += "\n"
+        output += format_bibliography([source])
+
     return output
 
 
@@ -2142,7 +2394,10 @@ def _format_vessel_disambiguation(
 
 
 @mcp.tool()
-async def track_vessel(identifier: str) -> str:
+async def track_vessel(
+    identifier: str,
+    rigor: bool | None = None,
+) -> str:
     """Track any vessel by name, IMO number, or MMSI.
 
     Returns current position, speed, heading, and vessel details from
@@ -2153,10 +2408,14 @@ async def track_vessel(identifier: str) -> str:
             - MMSI: 9 digits (e.g., "367596480", "353136000")
             - IMO: "IMO" + 7 digits (e.g., "IMO 9811000", "IMO9811000")
             - Vessel name: Ship name (e.g., "Ever Given", "MAERSK ALABAMA")
+        rigor: Enable rigor mode for IC-standard output with full source
+            attribution, confidence levels, and bibliography. If not specified,
+            uses global IGNIFER_RIGOR_MODE setting.
 
     Returns:
         Formatted vessel tracking report including position, speed, heading,
         vessel type, destination, and flag state. Or helpful error if not found.
+        In rigor mode, includes full source attribution and caveats.
 
     Note:
         AIS coverage is global but not 100%. Vessels may not be visible when:
@@ -2164,6 +2423,7 @@ async def track_vessel(identifier: str) -> str:
         - In port with shore-based equipment
         - Some vessels intentionally disable AIS for security
     """
+    effective_rigor = resolve_rigor_mode(rigor)
     # Validate identifier is not empty
     if not identifier or not identifier.strip():
         return (
@@ -2195,7 +2455,7 @@ async def track_vessel(identifier: str) -> str:
                 position_data = result.results[0]
             elif result.status == ResultStatus.NO_DATA:
                 # Vessel not broadcasting
-                return _format_vessel_output(identifier, None, retrieved_at)
+                return _format_vessel_output(identifier, None, retrieved_at, effective_rigor)
             elif result.status == ResultStatus.RATE_LIMITED:
                 return (
                     "## Rate Limited\n\n"
@@ -2236,7 +2496,7 @@ async def track_vessel(identifier: str) -> str:
             )
 
         # Format output
-        return _format_vessel_output(identifier, position_data, retrieved_at)
+        return _format_vessel_output(identifier, position_data, retrieved_at, effective_rigor)
 
     except AdapterAuthError:
         logger.warning("AISStream credentials not configured")
@@ -2278,9 +2538,7 @@ async def track_vessel(identifier: str) -> str:
 # =============================================================================
 
 
-def _format_trend_indicator(
-    trend: str | None, current: int, previous: int
-) -> str:
+def _format_trend_indicator(trend: str | None, current: int, previous: int) -> str:
     """Format trend indicator with percentage change.
 
     Args:
@@ -2366,9 +2624,7 @@ def _format_primary_actors(summary: dict[str, Any]) -> list[str]:
     return lines
 
 
-def _format_geographic_hotspots(
-    summary: dict[str, Any], total_events: int
-) -> list[str]:
+def _format_geographic_hotspots(summary: dict[str, Any], total_events: int) -> list[str]:
     """Format geographic distribution with event counts and percentages.
 
     Args:
@@ -2437,6 +2693,7 @@ def _format_conflict_analysis(
     result: Any,  # OSINTResult
     region: str,
     time_range: str | None,
+    rigor_mode: bool = False,
 ) -> str:
     """Format conflict analysis result for user-friendly output.
 
@@ -2444,6 +2701,7 @@ def _format_conflict_analysis(
         result: OSINTResult from ACLEDAdapter
         region: Original region query
         time_range: Optional time range string
+        rigor_mode: If True, add full source attribution and caveats
 
     Returns:
         Formatted conflict analysis report
@@ -2529,9 +2787,42 @@ def _format_conflict_analysis(
     # === Footer ===
     output += "-" * 55 + "\n"
     output += "Sources: ACLED (https://acleddata.com/)\n"
-    retrieved_at = result.retrieved_at.strftime("%Y-%m-%dT%H:%M:%S+00:00")
-    output += f"Data retrieved: {retrieved_at}\n"
+    retrieved_at_str = result.retrieved_at.strftime("%Y-%m-%dT%H:%M:%S+00:00")
+    output += f"Data retrieved: {retrieved_at_str}\n"
     output += "=" * 55 + "\n"
+
+    # Add rigor mode enhancements
+    if rigor_mode:
+        output += "\n" + "=" * 59 + "\n"
+        output += "RIGOR MODE ANALYSIS\n"
+        output += "=" * 59 + "\n\n"
+
+        # Source metadata
+        source = SourceMetadata(
+            source_name="acled",
+            source_url="https://acleddata.com/",
+            retrieved_at=result.retrieved_at,
+        )
+
+        # Confidence
+        calculator = ConfidenceCalculator()
+        confidence = calculator.calculate_from_sources([QualityTier.HIGH])
+
+        output += "## Confidence Assessment\n\n"
+        output += (
+            confidence_to_language(
+                confidence.level,
+                f"the conflict data for {region} is accurate",
+            )
+            + "\n\n"
+        )
+
+        # Analytical caveats
+        output += format_analytical_caveats(source_names=["acled"])
+
+        # Bibliography
+        output += "\n"
+        output += format_bibliography([source])
 
     return output
 
@@ -2540,6 +2831,7 @@ def _format_conflict_analysis(
 async def conflict_analysis(
     region: str,
     time_range: str | None = None,
+    rigor: bool | None = None,
 ) -> str:
     """Analyze conflict situations in a country or region.
 
@@ -2554,20 +2846,25 @@ async def conflict_analysis(
             - "last 7 days", "last 2 weeks"
             - "2026-01-01 to 2026-01-08" (ISO date range)
             If not specified, defaults to last 30 days.
+        rigor: Enable rigor mode for IC-standard output with full source
+            attribution, confidence levels, and bibliography. If not specified,
+            uses global IGNIFER_RIGOR_MODE setting.
 
     Returns:
         Formatted conflict analysis with event counts, actors, and trends.
         Or helpful error if data unavailable.
+        In rigor mode, includes ICD 203 confidence language and bibliography.
 
     Note:
         Requires ACLED API credentials. Register free at:
         https://acleddata.com/register/
     """
+    effective_rigor = resolve_rigor_mode(rigor)
     # Validate input: empty region produces confusing output
     if not region or not region.strip():
         return "Please provide a country or region name to analyze."
 
-    logger.info(f"Conflict analysis requested for: {region}")
+    logger.info(f"Conflict analysis requested for: {region}, rigor: {effective_rigor}")
 
     try:
         acled = _get_acled()
@@ -2590,7 +2887,7 @@ async def conflict_analysis(
             )
 
         # Success - format the output
-        return _format_conflict_analysis(result, region, time_range)
+        return _format_conflict_analysis(result, region, time_range, effective_rigor)
 
     except AdapterAuthError:
         # This shouldn't happen (adapter returns error in result) but handle anyway
@@ -2963,12 +3260,14 @@ def _format_sanctions_result(
 def _format_sanctions_check_result(
     result: Any,  # OSINTResult
     entity_name: str,
+    rigor_mode: bool = False,
 ) -> str:
     """Main formatter for sanctions check results.
 
     Args:
         result: OSINTResult from OpenSanctionsAdapter
         entity_name: Original query entity name
+        rigor_mode: If True, add explicit match confidence
 
     Returns:
         Formatted sanctions screening result
@@ -2981,17 +3280,57 @@ def _format_sanctions_check_result(
     match_status = _format_match_status(match)
 
     if match_status == "MATCH":
-        return _format_sanctions_result(entity_name, match, result.retrieved_at)
+        output = _format_sanctions_result(entity_name, match, result.retrieved_at)
     elif match_status == "PEP (NOT SANCTIONED)":
-        return _format_pep_result(entity_name, match, result.retrieved_at)
+        output = _format_pep_result(entity_name, match, result.retrieved_at)
     elif match_status == "PARTIAL MATCH":
-        return _format_partial_match_message(entity_name, match, result.retrieved_at)
+        output = _format_partial_match_message(entity_name, match, result.retrieved_at)
     else:
-        return _format_no_match_message(entity_name, result.retrieved_at)
+        output = _format_no_match_message(entity_name, result.retrieved_at)
+
+    # Add rigor mode enhancements (FR31)
+    if rigor_mode:
+        output += "\n" + "=" * 59 + "\n"
+        output += "RIGOR MODE ANALYSIS\n"
+        output += "=" * 59 + "\n\n"
+
+        # Explicit match confidence (FR31)
+        match_score = match.get("match_score", 0.0)
+        matched_name = match.get("caption", match.get("name", "Unknown"))
+
+        output += "## Match Confidence\n\n"
+        output += (
+            format_sanctions_match_confidence(
+                match_score=match_score,
+                entity_name=entity_name,
+                matched_name=matched_name,
+                match_type="name",
+            )
+            + "\n"
+        )
+
+        # Source metadata
+        source = SourceMetadata(
+            source_name="opensanctions",
+            source_url="https://www.opensanctions.org/",
+            retrieved_at=result.retrieved_at,
+        )
+
+        # Analytical caveats
+        output += format_analytical_caveats(source_names=["opensanctions"])
+
+        # Bibliography
+        output += "\n"
+        output += format_bibliography([source])
+
+    return output
 
 
 @mcp.tool()
-async def sanctions_check(entity: str) -> str:
+async def sanctions_check(
+    entity: str,
+    rigor: bool | None = None,
+) -> str:
     """Screen any entity against global sanctions lists.
 
     Check persons, companies, vessels, or other entities against OFAC, EU,
@@ -3001,12 +3340,17 @@ async def sanctions_check(entity: str) -> str:
     Args:
         entity: Entity name to screen (person, company, vessel, etc.)
                 Examples: "Rosneft", "Alisher Usmanov", "Akademik Cherskiy"
+        rigor: Enable rigor mode for IC-standard output with explicit match
+            confidence percentages and full source attribution. If not specified,
+            uses global IGNIFER_RIGOR_MODE setting.
 
     Returns:
         Formatted sanctions screening results with match status,
         sanctions lists, PEP status, and associated entities.
         Or helpful error message if screening fails.
+        In rigor mode, includes explicit match confidence percentages.
     """
+    effective_rigor = resolve_rigor_mode(rigor)
     # Input validation
     if not entity or not entity.strip():
         return (
@@ -3019,7 +3363,7 @@ async def sanctions_check(entity: str) -> str:
         )
 
     entity_cleaned = entity.strip()
-    logger.info(f"Sanctions check requested for: {entity_cleaned}")
+    logger.info(f"Sanctions check requested for: {entity_cleaned}, rigor: {effective_rigor}")
 
     try:
         adapter = _get_opensanctions()
@@ -3039,7 +3383,7 @@ async def sanctions_check(entity: str) -> str:
             )
 
         # Success - format the output
-        return _format_sanctions_check_result(result, entity_cleaned)
+        return _format_sanctions_check_result(result, entity_cleaned, effective_rigor)
 
     except AdapterTimeoutError as e:
         logger.warning(f"Timeout screening {entity_cleaned}: {e}")
@@ -3273,6 +3617,7 @@ def _format_deep_dive_output(
     result: AggregatedResult,
     unavailable_sources: list[tuple[str, str]],
     focus: str | None,
+    rigor_mode: bool = False,
 ) -> str:
     """Format the complete deep dive output.
 
@@ -3281,6 +3626,7 @@ def _format_deep_dive_output(
         result: The aggregated result from Correlator
         unavailable_sources: List of (source_name, reason) tuples
         focus: Optional focus area
+        rigor_mode: If True, add full rigor mode enhancements
 
     Returns:
         Complete formatted deep dive report
@@ -3313,8 +3659,13 @@ def _format_deep_dive_output(
 
     # Output findings grouped by source
     source_order = [
-        "gdelt", "worldbank", "acled", "wikidata",
-        "opensanctions", "opensky", "aisstream",
+        "gdelt",
+        "worldbank",
+        "acled",
+        "wikidata",
+        "opensanctions",
+        "opensky",
+        "aisstream",
     ]
     for source_name in source_order:
         if source_name in findings_by_source:
@@ -3349,11 +3700,64 @@ def _format_deep_dive_output(
     confidence_level = result.to_confidence_level().name
     output += _format_deep_dive_footer(confidence_level)
 
+    # Add rigor mode enhancements
+    if rigor_mode:
+        timestamp_dt = datetime.now(timezone.utc)
+
+        output += "\n" + "=" * 59 + "\n"
+        output += "RIGOR MODE ANALYSIS\n"
+        output += "=" * 59 + "\n\n"
+
+        # Confidence statement in IC language
+        output += "## Confidence Assessment\n\n"
+        conf_level = result.to_confidence_level()
+        output += (
+            confidence_to_language(
+                conf_level,
+                f"the analysis of {topic} accurately represents current conditions",
+            )
+            + "\n\n"
+        )
+
+        # Build source metadata list
+        sources: list[SourceMetadata] = []
+        source_url_map = {
+            "gdelt": "https://api.gdeltproject.org/",
+            "worldbank": "https://api.worldbank.org/",
+            "acled": "https://acleddata.com/",
+            "wikidata": "https://www.wikidata.org/",
+            "opensanctions": "https://www.opensanctions.org/",
+            "opensky": "https://opensky-network.org/",
+            "aisstream": "https://aisstream.io/",
+        }
+        for source_name in result.sources_queried:
+            url = source_url_map.get(source_name.lower(), f"https://{source_name}.org/")
+            sources.append(
+                SourceMetadata(
+                    source_name=source_name,
+                    source_url=url,
+                    retrieved_at=timestamp_dt,
+                )
+            )
+
+        # Analytical caveats
+        output += format_analytical_caveats(
+            source_names=[s.lower() for s in result.sources_queried],
+        )
+
+        # Bibliography
+        output += "\n"
+        output += format_bibliography(sources)
+
     return output
 
 
 @mcp.tool()
-async def deep_dive(topic: str, focus: str | None = None) -> str:
+async def deep_dive(
+    topic: str,
+    focus: str | None = None,
+    rigor: bool | None = None,
+) -> str:
     """Comprehensive multi-source OSINT analysis.
 
     Queries all relevant data sources concurrently and correlates results
@@ -3362,6 +3766,9 @@ async def deep_dive(topic: str, focus: str | None = None) -> str:
     Args:
         topic: The subject to analyze (country, person, organization, vessel, event)
         focus: Optional focus area to emphasize (e.g., "sanctions", "conflict", "economic")
+        rigor: Enable rigor mode for IC-standard output with full source
+            attribution, confidence levels, corroboration analysis, and
+            bibliography. If not specified, uses global IGNIFER_RIGOR_MODE setting.
 
     Returns:
         Comprehensive intelligence report with:
@@ -3370,6 +3777,7 @@ async def deep_dive(topic: str, focus: str | None = None) -> str:
         - Corroboration notes where sources agree
         - Conflict notes where sources disagree
         - Overall confidence assessment
+        In rigor mode, includes ICD 203 confidence language and full bibliography.
 
     Examples:
         deep_dive("Myanmar")  # Country analysis
@@ -3377,6 +3785,7 @@ async def deep_dive(topic: str, focus: str | None = None) -> str:
         deep_dive("Iran", focus="sanctions")  # Focused analysis
         deep_dive("NS Champion")  # Vessel analysis
     """
+    effective_rigor = resolve_rigor_mode(rigor)
     # Input validation
     if not topic or not topic.strip():
         return (
@@ -3389,7 +3798,7 @@ async def deep_dive(topic: str, focus: str | None = None) -> str:
         )
 
     topic_cleaned = topic.strip()
-    logger.info(f"Deep dive requested for: {topic_cleaned}, focus: {focus}")
+    logger.info(f"Deep dive: topic={topic_cleaned}, focus={focus}, rigor={effective_rigor}")
 
     try:
         # Get relevance engine and analyze the topic
@@ -3416,8 +3825,7 @@ async def deep_dive(topic: str, focus: str | None = None) -> str:
             for source_name in focus_sources:
                 # Check if source is available
                 source_info = next(
-                    (s for s in relevance_result.sources if s.source_name == source_name),
-                    None
+                    (s for s in relevance_result.sources if s.source_name == source_name), None
                 )
                 if source_info:
                     already_unavailable = source_name in [u[0] for u in unavailable_sources]
@@ -3454,6 +3862,7 @@ async def deep_dive(topic: str, focus: str | None = None) -> str:
             result,
             unavailable_sources,
             focus,
+            rigor_mode=effective_rigor,
         )
 
         logger.info(f"Deep dive completed for: {topic_cleaned}")
