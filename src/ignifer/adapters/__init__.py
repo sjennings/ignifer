@@ -1,5 +1,6 @@
 """OSINT data source adapters."""
 
+from ignifer.adapters.aisstream import AISStreamAdapter
 from ignifer.adapters.base import (
     AdapterAuthError,
     AdapterError,
@@ -19,6 +20,7 @@ __all__ = [
     "AdapterTimeoutError",
     "AdapterParseError",
     "AdapterAuthError",
+    "AISStreamAdapter",
     "GDELTAdapter",
     "OpenSkyAdapter",
     "WikidataAdapter",
