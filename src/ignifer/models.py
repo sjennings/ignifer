@@ -7,33 +7,66 @@ from pydantic import BaseModel, ConfigDict, field_serializer
 
 
 class ConfidenceLevel(Enum):
-    """ICD 203 intelligence confidence levels."""
+    """ICD 203 intelligence confidence levels.
 
-    REMOTE = 1  # <20%
-    UNLIKELY = 2  # 20-40%
-    EVEN_CHANCE = 3  # 40-60%
-    LIKELY = 4  # 60-80%
-    VERY_LIKELY = 5  # 80-95%
-    ALMOST_CERTAIN = 6  # >95%
+    Based on Intelligence Community Directive 203 probabilistic language:
+    - REMOTE: <5% probability
+    - VERY_UNLIKELY: 5-20% probability
+    - UNLIKELY: 20-45% probability
+    - ROUGHLY_EVEN: 45-55% probability
+    - LIKELY: 55-80% probability
+    - VERY_LIKELY: 80-95% probability
+    - ALMOST_CERTAIN: >95% probability
+    """
 
-    def to_percentage_range(self) -> tuple[int, int]:
-        """Convert confidence level to percentage range."""
+    REMOTE = 1  # <5%
+    VERY_UNLIKELY = 2  # 5-20%
+    UNLIKELY = 3  # 20-45%
+    ROUGHLY_EVEN = 4  # 45-55%
+    LIKELY = 5  # 55-80%
+    VERY_LIKELY = 6  # 80-95%
+    ALMOST_CERTAIN = 7  # >95%
+
+    @property
+    def percentage_range(self) -> tuple[int, int]:
+        """Return percentage range as tuple (min, max).
+
+        Returns:
+            Tuple of (min_percentage, max_percentage).
+        """
         ranges = {
-            ConfidenceLevel.REMOTE: (0, 20),
-            ConfidenceLevel.UNLIKELY: (20, 40),
-            ConfidenceLevel.EVEN_CHANCE: (40, 60),
-            ConfidenceLevel.LIKELY: (60, 80),
+            ConfidenceLevel.REMOTE: (0, 5),
+            ConfidenceLevel.VERY_UNLIKELY: (5, 20),
+            ConfidenceLevel.UNLIKELY: (20, 45),
+            ConfidenceLevel.ROUGHLY_EVEN: (45, 55),
+            ConfidenceLevel.LIKELY: (55, 80),
             ConfidenceLevel.VERY_LIKELY: (80, 95),
             ConfidenceLevel.ALMOST_CERTAIN: (95, 100),
         }
         return ranges[self]
 
+    def to_percentage_range(self) -> tuple[int, int]:
+        """Convert confidence level to percentage range.
+
+        Deprecated: Use percentage_range property instead.
+        Maintained for backward compatibility.
+
+        Returns:
+            Tuple of (min_percentage, max_percentage).
+        """
+        return self.percentage_range
+
     def to_label(self) -> str:
-        """Convert confidence level to human-readable label."""
+        """Convert confidence level to human-readable label.
+
+        Returns:
+            Human-readable label for the confidence level.
+        """
         labels = {
             ConfidenceLevel.REMOTE: "Remote possibility",
+            ConfidenceLevel.VERY_UNLIKELY: "Very unlikely",
             ConfidenceLevel.UNLIKELY: "Unlikely",
-            ConfidenceLevel.EVEN_CHANCE: "Even chance",
+            ConfidenceLevel.ROUGHLY_EVEN: "Roughly even chance",
             ConfidenceLevel.LIKELY: "Likely",
             ConfidenceLevel.VERY_LIKELY: "Very likely",
             ConfidenceLevel.ALMOST_CERTAIN: "Almost certain",

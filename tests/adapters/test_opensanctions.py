@@ -11,8 +11,7 @@ import pytest
 from ignifer.adapters.base import AdapterParseError, AdapterTimeoutError
 from ignifer.adapters.opensanctions import OpenSanctionsAdapter
 from ignifer.cache import CacheEntry
-from ignifer.models import ConfidenceLevel, QueryParams, QualityTier, ResultStatus
-
+from ignifer.models import ConfidenceLevel, QualityTier, QueryParams, ResultStatus
 
 # Load fixture once at module level
 FIXTURES_DIR = Path(__file__).parent.parent / "fixtures"
@@ -74,33 +73,53 @@ class TestOpenSanctionsAdapterLazyClient:
 class TestOpenSanctionsAdapterHelpers:
     """Tests for helper methods."""
 
-    def test_map_score_to_confidence_very_likely(self) -> None:
-        """Score >= 0.9 maps to VERY_LIKELY."""
+    def test_map_score_to_confidence_almost_certain(self) -> None:
+        """Score >= 0.95 maps to ALMOST_CERTAIN."""
         adapter = OpenSanctionsAdapter()
+        assert adapter._map_score_to_confidence(0.95) == ConfidenceLevel.ALMOST_CERTAIN
+        assert adapter._map_score_to_confidence(0.99) == ConfidenceLevel.ALMOST_CERTAIN
+        assert adapter._map_score_to_confidence(1.0) == ConfidenceLevel.ALMOST_CERTAIN
+
+    def test_map_score_to_confidence_very_likely(self) -> None:
+        """Score >= 0.8 and < 0.95 maps to VERY_LIKELY."""
+        adapter = OpenSanctionsAdapter()
+        assert adapter._map_score_to_confidence(0.8) == ConfidenceLevel.VERY_LIKELY
         assert adapter._map_score_to_confidence(0.9) == ConfidenceLevel.VERY_LIKELY
-        assert adapter._map_score_to_confidence(0.98) == ConfidenceLevel.VERY_LIKELY
-        assert adapter._map_score_to_confidence(1.0) == ConfidenceLevel.VERY_LIKELY
+        assert adapter._map_score_to_confidence(0.94) == ConfidenceLevel.VERY_LIKELY
 
     def test_map_score_to_confidence_likely(self) -> None:
-        """Score >= 0.7 and < 0.9 maps to LIKELY."""
+        """Score >= 0.55 and < 0.8 maps to LIKELY."""
         adapter = OpenSanctionsAdapter()
+        assert adapter._map_score_to_confidence(0.55) == ConfidenceLevel.LIKELY
         assert adapter._map_score_to_confidence(0.7) == ConfidenceLevel.LIKELY
-        assert adapter._map_score_to_confidence(0.85) == ConfidenceLevel.LIKELY
-        assert adapter._map_score_to_confidence(0.89) == ConfidenceLevel.LIKELY
+        assert adapter._map_score_to_confidence(0.79) == ConfidenceLevel.LIKELY
 
-    def test_map_score_to_confidence_even_chance(self) -> None:
-        """Score >= 0.5 and < 0.7 maps to EVEN_CHANCE."""
+    def test_map_score_to_confidence_roughly_even(self) -> None:
+        """Score >= 0.45 and < 0.55 maps to ROUGHLY_EVEN."""
         adapter = OpenSanctionsAdapter()
-        assert adapter._map_score_to_confidence(0.5) == ConfidenceLevel.EVEN_CHANCE
-        assert adapter._map_score_to_confidence(0.6) == ConfidenceLevel.EVEN_CHANCE
-        assert adapter._map_score_to_confidence(0.69) == ConfidenceLevel.EVEN_CHANCE
+        assert adapter._map_score_to_confidence(0.45) == ConfidenceLevel.ROUGHLY_EVEN
+        assert adapter._map_score_to_confidence(0.50) == ConfidenceLevel.ROUGHLY_EVEN
+        assert adapter._map_score_to_confidence(0.54) == ConfidenceLevel.ROUGHLY_EVEN
 
     def test_map_score_to_confidence_unlikely(self) -> None:
-        """Score < 0.5 maps to UNLIKELY."""
+        """Score >= 0.2 and < 0.45 maps to UNLIKELY."""
         adapter = OpenSanctionsAdapter()
-        assert adapter._map_score_to_confidence(0.4) == ConfidenceLevel.UNLIKELY
         assert adapter._map_score_to_confidence(0.2) == ConfidenceLevel.UNLIKELY
-        assert adapter._map_score_to_confidence(0.0) == ConfidenceLevel.UNLIKELY
+        assert adapter._map_score_to_confidence(0.3) == ConfidenceLevel.UNLIKELY
+        assert adapter._map_score_to_confidence(0.44) == ConfidenceLevel.UNLIKELY
+
+    def test_map_score_to_confidence_very_unlikely(self) -> None:
+        """Score >= 0.05 and < 0.2 maps to VERY_UNLIKELY."""
+        adapter = OpenSanctionsAdapter()
+        assert adapter._map_score_to_confidence(0.05) == ConfidenceLevel.VERY_UNLIKELY
+        assert adapter._map_score_to_confidence(0.1) == ConfidenceLevel.VERY_UNLIKELY
+        assert adapter._map_score_to_confidence(0.19) == ConfidenceLevel.VERY_UNLIKELY
+
+    def test_map_score_to_confidence_remote(self) -> None:
+        """Score < 0.05 maps to REMOTE."""
+        adapter = OpenSanctionsAdapter()
+        assert adapter._map_score_to_confidence(0.0) == ConfidenceLevel.REMOTE
+        assert adapter._map_score_to_confidence(0.04) == ConfidenceLevel.REMOTE
 
     def test_is_pep_only_true(self) -> None:
         """_is_pep_only returns True for PEP without sanctions."""
@@ -158,7 +177,7 @@ class TestOpenSanctionsAdapterHelpers:
         assert result["first_seen"] == "2020-01-01"
         assert result["last_seen"] == "2024-01-01"
         assert result["match_score"] == 0.95
-        assert result["match_confidence"] == "VERY_LIKELY"
+        assert result["match_confidence"] == "ALMOST_CERTAIN"  # 0.95 >= threshold
         assert result["referents"] == "ofac-123"
         assert result["referents_count"] == 1
 
@@ -215,7 +234,7 @@ class TestOpenSanctionsAdapterQuery:
 
     @pytest.mark.asyncio
     async def test_query_with_high_confidence_match(self, httpx_mock) -> None:
-        """High-score match returns VERY_LIKELY confidence."""
+        """High-score match (>=0.95) returns ALMOST_CERTAIN confidence."""
         fixture = load_fixture("opensanctions_entity.json")
 
         httpx_mock.add_response(
@@ -229,8 +248,9 @@ class TestOpenSanctionsAdapterQuery:
 
         assert result.status == ResultStatus.SUCCESS
         assert result.results[0]["match_score"] == 0.98
-        assert result.results[0]["match_confidence"] == "VERY_LIKELY"
-        assert result.sources[0].confidence == ConfidenceLevel.VERY_LIKELY
+        # 0.98 >= 0.95 threshold maps to ALMOST_CERTAIN
+        assert result.results[0]["match_confidence"] == "ALMOST_CERTAIN"
+        assert result.sources[0].confidence == ConfidenceLevel.ALMOST_CERTAIN
 
         await adapter.close()
 

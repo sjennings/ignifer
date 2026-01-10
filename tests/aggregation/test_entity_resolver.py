@@ -122,6 +122,7 @@ class TestEntityMatch:
             original_query="Vladimir Putin",
             matched_label="Vladimir Putin",
             suggestions=["test suggestion"],
+            confidence_factors=["Exact match", "High confidence"],
         )
 
         result = match.to_dict()
@@ -130,9 +131,47 @@ class TestEntityMatch:
         assert result["wikidata_qid"] == "Q7747"
         assert result["resolution_tier"] == "exact"
         assert result["match_confidence"] == 1.0
+        assert result["confidence_level"] == "ALMOST_CERTAIN"
         assert result["original_query"] == "Vladimir Putin"
         assert result["matched_label"] == "Vladimir Putin"
         assert result["suggestions"] == ["test suggestion"]
+        assert result["confidence_factors"] == ["Exact match", "High confidence"]
+
+    def test_to_confidence_level_returns_icd203_level(self) -> None:
+        """to_confidence_level should map float to ICD 203 ConfidenceLevel."""
+        from ignifer.models import ConfidenceLevel
+
+        # Test high confidence -> ALMOST_CERTAIN
+        match_high = EntityMatch(
+            resolution_tier=ResolutionTier.EXACT,
+            match_confidence=1.0,
+            original_query="test",
+        )
+        assert match_high.to_confidence_level() == ConfidenceLevel.ALMOST_CERTAIN
+
+        # Test medium confidence -> VERY_LIKELY
+        match_medium = EntityMatch(
+            resolution_tier=ResolutionTier.WIKIDATA,
+            match_confidence=0.85,
+            original_query="test",
+        )
+        assert match_medium.to_confidence_level() == ConfidenceLevel.VERY_LIKELY
+
+        # Test low confidence -> LIKELY
+        match_low = EntityMatch(
+            resolution_tier=ResolutionTier.FUZZY,
+            match_confidence=0.75,
+            original_query="test",
+        )
+        assert match_low.to_confidence_level() == ConfidenceLevel.LIKELY
+
+        # Test failed -> REMOTE
+        match_failed = EntityMatch(
+            resolution_tier=ResolutionTier.FAILED,
+            match_confidence=0.0,
+            original_query="test",
+        )
+        assert match_failed.to_confidence_level() == ConfidenceLevel.REMOTE
 
 
 class TestEntityResolver:

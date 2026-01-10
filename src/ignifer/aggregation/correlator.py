@@ -113,12 +113,14 @@ class AggregatedResult(BaseModel):
             return ConfidenceLevel.ALMOST_CERTAIN
         elif self.overall_confidence >= 0.80:
             return ConfidenceLevel.VERY_LIKELY
-        elif self.overall_confidence >= 0.60:
+        elif self.overall_confidence >= 0.55:
             return ConfidenceLevel.LIKELY
-        elif self.overall_confidence >= 0.40:
-            return ConfidenceLevel.EVEN_CHANCE
+        elif self.overall_confidence >= 0.45:
+            return ConfidenceLevel.ROUGHLY_EVEN
         elif self.overall_confidence >= 0.20:
             return ConfidenceLevel.UNLIKELY
+        elif self.overall_confidence >= 0.05:
+            return ConfidenceLevel.VERY_UNLIKELY
         else:
             return ConfidenceLevel.REMOTE
 
@@ -285,11 +287,7 @@ class Correlator:
 
             # Get adapter for quality tier
             adapter = self._adapters.get(source_name)
-            quality_tier = (
-                adapter.base_quality_tier
-                if adapter
-                else QualityTier.MEDIUM
-            )
+            quality_tier = adapter.base_quality_tier if adapter else QualityTier.MEDIUM
 
             # Get source URL from result sources if available
             source_url = None
@@ -314,9 +312,7 @@ class Correlator:
 
                 if normalized_topic not in findings_by_topic:
                     findings_by_topic[normalized_topic] = []
-                findings_by_topic[normalized_topic].append(
-                    (source_name, contribution, content)
-                )
+                findings_by_topic[normalized_topic].append((source_name, contribution, content))
 
         return findings_by_topic
 
@@ -452,7 +448,7 @@ class Correlator:
         # Compare results pairwise for key fields
         source_names = list(valid_results.keys())
         for i, source_a_name in enumerate(source_names):
-            for source_b_name in source_names[i + 1:]:
+            for source_b_name in source_names[i + 1 :]:
                 result_a = valid_results[source_a_name]
                 result_b = valid_results[source_b_name]
 
@@ -516,16 +512,8 @@ class Correlator:
                         continue
 
                     # Get source URL
-                    url_a = (
-                        result_a.sources[0].metadata.source_url
-                        if result_a.sources
-                        else None
-                    )
-                    url_b = (
-                        result_b.sources[0].metadata.source_url
-                        if result_b.sources
-                        else None
-                    )
+                    url_a = result_a.sources[0].metadata.source_url if result_a.sources else None
+                    url_b = result_b.sources[0].metadata.source_url if result_b.sources else None
 
                     contribution_a = SourceContribution(
                         source_name=source_a_name,
@@ -628,9 +616,7 @@ class Correlator:
 
         # Corroboration bonus
         corroborated_count = sum(
-            1
-            for f in findings
-            if f.status == CorroborationStatus.CORROBORATED
+            1 for f in findings if f.status == CorroborationStatus.CORROBORATED
         )
         corroboration_bonus = min(corroborated_count * 0.1, 0.3)
 
@@ -639,9 +625,7 @@ class Correlator:
 
         # Single source penalty
         single_source_count = sum(
-            1
-            for f in findings
-            if f.status == CorroborationStatus.SINGLE_SOURCE
+            1 for f in findings if f.status == CorroborationStatus.SINGLE_SOURCE
         )
         single_source_penalty = 0.05 if single_source_count == len(findings) else 0.0
 
@@ -665,11 +649,7 @@ class Correlator:
                 continue
 
             adapter = self._adapters.get(source_name)
-            quality_tier = (
-                adapter.base_quality_tier
-                if adapter
-                else QualityTier.MEDIUM
-            )
+            quality_tier = adapter.base_quality_tier if adapter else QualityTier.MEDIUM
 
             source_url = None
             if result.sources:

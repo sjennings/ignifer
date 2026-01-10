@@ -74,20 +74,28 @@ class OpenSanctionsAdapter:
     def _map_score_to_confidence(self, score: float) -> ConfidenceLevel:
         """Map OpenSanctions match score to ConfidenceLevel.
 
+        Uses ICD 203 confidence levels based on match score.
+
         Args:
             score: OpenSanctions match score (0.0-1.0)
 
         Returns:
             Appropriate ConfidenceLevel enum value
         """
-        if score >= 0.9:
+        if score >= 0.95:
+            return ConfidenceLevel.ALMOST_CERTAIN
+        elif score >= 0.8:
             return ConfidenceLevel.VERY_LIKELY
-        elif score >= 0.7:
+        elif score >= 0.55:
             return ConfidenceLevel.LIKELY
-        elif score >= 0.5:
-            return ConfidenceLevel.EVEN_CHANCE
-        else:
+        elif score >= 0.45:
+            return ConfidenceLevel.ROUGHLY_EVEN
+        elif score >= 0.2:
             return ConfidenceLevel.UNLIKELY
+        elif score >= 0.05:
+            return ConfidenceLevel.VERY_UNLIKELY
+        else:
+            return ConfidenceLevel.REMOTE
 
     def _is_pep_only(self, topics: list[str]) -> bool:
         """Check if entity is PEP but not sanctioned (FR19).
@@ -128,9 +136,7 @@ class OpenSanctionsAdapter:
             "name": ", ".join(properties.get("name", [])),
             "aliases": ", ".join(properties.get("alias", [])),
             "birth_date": (
-                properties.get("birthDate", [None])[0]
-                if properties.get("birthDate")
-                else None
+                properties.get("birthDate", [None])[0] if properties.get("birthDate") else None
             ),
             "nationality": ", ".join(properties.get("nationality", [])),
             "position": ", ".join(properties.get("position", [])),
@@ -453,9 +459,7 @@ class OpenSanctionsAdapter:
             retrieved_at=retrieved_at,
         )
 
-    def _build_result_from_cache(
-        self, query: str, cached_data: dict[str, Any]
-    ) -> OSINTResult:
+    def _build_result_from_cache(self, query: str, cached_data: dict[str, Any]) -> OSINTResult:
         """Build OSINTResult from cached data.
 
         Args:
