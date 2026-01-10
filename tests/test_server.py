@@ -250,14 +250,8 @@ class TestDeepDiveTool:
                     reasoning="Wikidata provides entity context",
                     available=True,
                 ),
-                SourceRelevance(
-                    source_name="opensanctions",
-                    score=RelevanceScore.MEDIUM,
-                    reasoning="OpenSanctions provides sanctions data",
-                    available=True,
-                ),
             ],
-            available_sources=["gdelt", "worldbank", "wikidata", "opensanctions"],
+            available_sources=["gdelt", "worldbank", "wikidata"],
             unavailable_sources=[],
         )
 
@@ -362,19 +356,13 @@ class TestDeepDiveTool:
                     available=True,
                 ),
                 SourceRelevance(
-                    source_name="opensanctions",
-                    score=RelevanceScore.HIGH,
-                    reasoning="OpenSanctions provides sanctions data",
-                    available=True,
-                ),
-                SourceRelevance(
                     source_name="gdelt",
                     score=RelevanceScore.MEDIUM,
                     reasoning="GDELT may have news mentions",
                     available=True,
                 ),
             ],
-            available_sources=["wikidata", "opensanctions", "gdelt"],
+            available_sources=["wikidata", "gdelt"],
             unavailable_sources=[],
         )
 
@@ -412,15 +400,15 @@ class TestDeepDiveTool:
             correlator.aggregate = AsyncMock(return_value=mock_aggregated_result)
             mock_correlator.return_value = correlator
 
-            await deep_dive.fn("Iran", focus="sanctions")
+            await deep_dive.fn("Iran", focus="economic")
 
             # Verify correlator was called
             correlator.aggregate.assert_called_once()
-            # Check the sources passed include sanctions-related ones
+            # Check the sources passed include economic-related ones
             call_args = correlator.aggregate.call_args
             sources_called = call_args[0][1]
-            # Should include opensanctions due to focus boost
-            assert "opensanctions" in sources_called or "gdelt" in sources_called
+            # Should include worldbank due to economic focus boost
+            assert "worldbank" in sources_called or "gdelt" in sources_called
 
     @pytest.mark.asyncio
     async def test_deep_dive_empty_topic_returns_error(self) -> None:
@@ -669,9 +657,9 @@ class TestDeepDiveTool:
                     available=True,
                 ),
                 SourceRelevance(
-                    source_name="opensanctions",
-                    score=RelevanceScore.MEDIUM_HIGH,
-                    reasoning="OpenSanctions tracks vessel sanctions",
+                    source_name="wikidata",
+                    score=RelevanceScore.MEDIUM,
+                    reasoning="Wikidata provides vessel details",
                     available=True,
                 ),
                 SourceRelevance(
@@ -681,7 +669,7 @@ class TestDeepDiveTool:
                     available=True,
                 ),
             ],
-            available_sources=["aisstream", "opensanctions", "gdelt"],
+            available_sources=["aisstream", "wikidata", "gdelt"],
             unavailable_sources=[],
         )
 
@@ -704,7 +692,7 @@ class TestDeepDiveTool:
                 ),
             ],
             conflicts=[],
-            sources_queried=["aisstream", "opensanctions", "gdelt"],
+            sources_queried=["aisstream", "wikidata", "gdelt"],
             sources_failed=[],
             overall_confidence=0.5,
             source_attributions=[],
@@ -782,7 +770,7 @@ class TestDeepDiveTool:
 # ============================================================================
 
 from ignifer.config import reset_settings
-from ignifer.server import entity_lookup, sanctions_check
+from ignifer.server import entity_lookup
 
 
 class TestBriefingRigorMode:
@@ -1081,79 +1069,6 @@ class TestEntityLookupRigorMode:
             assert "95%" in result or "confidence" in result.lower()
             # Should include analytical caveats
             assert "Caveats" in result
-
-
-class TestSanctionsCheckRigorMode:
-    """Integration tests for sanctions_check tool with rigor mode."""
-
-    @pytest.mark.asyncio
-    async def test_sanctions_check_rigor_includes_match_confidence(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """Sanctions check with rigor=True includes explicit match confidence (FR31)."""
-        reset_settings()
-        monkeypatch.setenv("IGNIFER_RIGOR_MODE", "false")
-
-        # Use properly structured result data that matches OSINTResult expectations
-        mock_result = OSINTResult(
-            status=ResultStatus.SUCCESS,
-            query="Rosneft",
-            results=[
-                {
-                    "entity_id": "NK-12345",
-                    "caption": "Rosneft Oil Company",
-                    "schema": "Company",
-                    "name": "Rosneft Oil Company",
-                    "aliases": "Rosneft Corp",
-                    "birth_date": None,
-                    "nationality": "ru",
-                    "position": "",
-                    "sanctions_lists": "us_ofac_sdn, eu_fsf",
-                    "sanctions_count": 2,
-                    "is_sanctioned": True,
-                    "is_pep": False,
-                    "is_poi": False,
-                    "first_seen": "2014-07-16",
-                    "last_seen": "2024-01-15",
-                    "referents": None,
-                    "referents_count": 0,
-                    "url": "https://www.opensanctions.org/entities/NK-12345",
-                    "match_score": 0.92,
-                    "match_confidence": "VERY_LIKELY",
-                }
-            ],
-            sources=[
-                SourceAttribution(
-                    source="opensanctions",
-                    quality=QualityTier.HIGH,
-                    confidence=ConfidenceLevel.VERY_LIKELY,
-                    metadata=SourceMetadata(
-                        source_name="opensanctions",
-                        source_url="https://api.opensanctions.org/match/default",
-                        retrieved_at=datetime.now(timezone.utc),
-                    ),
-                )
-            ],
-            retrieved_at=datetime.now(timezone.utc),
-        )
-
-        with patch("ignifer.server._get_opensanctions") as mock_adapter:
-            adapter_instance = AsyncMock()
-            adapter_instance.search_entity.return_value = mock_result
-            mock_adapter.return_value = adapter_instance
-
-            result = await sanctions_check.fn(entity="Rosneft", rigor=True)
-
-            # Should include rigor mode section
-            assert "RIGOR MODE ANALYSIS" in result
-            # Should include match confidence (FR31)
-            assert "Match Confidence" in result
-            # Should show assessment
-            assert "confidence" in result.lower()
-            # Should include analytical caveats
-            assert "Caveats" in result
-            # Should include bibliography
-            assert "Sources" in result or "SOURCES" in result
 
 
 class TestRigorModeResolution:

@@ -277,7 +277,6 @@ class SourceRelevanceEngine:
         "wikidata",
         "opensky",
         "aisstream",
-        "opensanctions",
     )
 
     # Sources that don't require authentication
@@ -285,7 +284,6 @@ class SourceRelevanceEngine:
         "gdelt",
         "worldbank",
         "wikidata",
-        "opensanctions",
     }
 
     def __init__(self, settings: Settings | None = None) -> None:
@@ -511,8 +509,6 @@ class SourceRelevanceEngine:
             return self._score_opensky(query_type, query_lower)
         elif source_name == "aisstream":
             return self._score_aisstream(query_type, query_lower)
-        elif source_name == "opensanctions":
-            return self._score_opensanctions(query_type, query_lower)
         else:
             return RelevanceScore.LOW, f"Unknown source: {source_name}"
 
@@ -640,38 +636,6 @@ class SourceRelevanceEngine:
             return RelevanceScore.LOW, "AISStream focuses on vessels, not country analysis"
         else:
             return RelevanceScore.LOW, "AISStream is specific to vessel tracking"
-
-    def _score_opensanctions(
-        self, query_type: QueryType, query_lower: str
-    ) -> tuple[RelevanceScore, str]:
-        """Score OpenSanctions relevance.
-
-        Args:
-            query_type: Detected query type.
-            query_lower: Lowercase query text.
-
-        Returns:
-            Tuple of (RelevanceScore, reasoning).
-        """
-        if query_type == QueryType.PERSON:
-            return (
-                RelevanceScore.HIGH,
-                "OpenSanctions provides sanctions and PEP status for individuals",
-            )
-        elif query_type == QueryType.VESSEL:
-            return RelevanceScore.HIGH, "OpenSanctions tracks sanctioned vessels"
-        elif query_type == QueryType.ORGANIZATION:
-            return (
-                RelevanceScore.HIGH,
-                "OpenSanctions provides sanctions data for organizations",
-            )
-        elif query_type == QueryType.COUNTRY:
-            return (
-                RelevanceScore.MEDIUM,
-                "OpenSanctions can identify sanctioned entities in this region",
-            )
-        else:
-            return RelevanceScore.MEDIUM, "OpenSanctions provides sanctions screening"
 
     def _check_source_availability(
         self, source_name: str

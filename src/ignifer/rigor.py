@@ -156,7 +156,6 @@ def format_analytical_caveats(
     source_caveats = {
         "gdelt": "GDELT coverage may be incomplete for some languages/regions.",
         "worldbank": "World Bank data reflects latest available year, which may be 1-2 years old.",
-        "opensanctions": "Sanctions status reflects point-in-time; lists are updated frequently.",
         "opensky": "ADS-B coverage is not global; some flights may not be visible.",
         "aisstream": "AIS coverage varies; some vessels may disable transponders.",
         "wikidata": "Wikidata is community-maintained; verify critical facts.",
@@ -305,41 +304,6 @@ def format_entity_match_confidence(
     return statement
 
 
-def format_sanctions_match_confidence(
-    match_score: float,
-    entity_name: str,
-    matched_name: str,
-    match_type: str = "name",
-) -> str:
-    """Format sanctions match confidence for rigor mode (FR31).
-
-    Args:
-        match_score: Match score as 0.0-1.0 float.
-        entity_name: The queried entity name.
-        matched_name: The matched entity name from sanctions list.
-        match_type: Type of match (name, alias, etc.).
-
-    Returns:
-        Formatted sanctions match confidence statement.
-    """
-    calculator = ConfidenceCalculator()
-    level = calculator.percentage_to_level(match_score)
-    percentage = int(match_score * 100)
-
-    statement = f"Match confidence: {percentage}% ({level.name})\n"
-    statement += f'Query: "{entity_name}"\n'
-    statement += f'Matched: "{matched_name}" (via {match_type} comparison)\n'
-
-    if level in (ConfidenceLevel.VERY_LIKELY, ConfidenceLevel.ALMOST_CERTAIN):
-        statement += "Assessment: HIGH confidence match - likely the same entity.\n"
-    elif level == ConfidenceLevel.LIKELY:
-        statement += "Assessment: MODERATE confidence match - probable but verify.\n"
-    else:
-        statement += "Assessment: LOW confidence match - requires verification.\n"
-
-    return statement
-
-
 __all__ = [
     "resolve_rigor_mode",
     "format_rigor_header",
@@ -349,5 +313,4 @@ __all__ = [
     "format_bibliography",
     "format_rigor_output",
     "format_entity_match_confidence",
-    "format_sanctions_match_confidence",
 ]

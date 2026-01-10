@@ -97,7 +97,6 @@ class Settings(BaseSettings):
     ttl_opensky: int = 300  # 5 minutes
     ttl_aisstream: int = 900  # 15 minutes
     ttl_worldbank: int = 86400  # 24 hours
-    ttl_opensanctions: int = 86400  # 24 hours
     ttl_wikidata: int = 604800  # 7 days
 
     # Logging
@@ -125,7 +124,6 @@ class Settings(BaseSettings):
             "ttl_opensky",
             "ttl_aisstream",
             "ttl_worldbank",
-            "ttl_opensanctions",
             "ttl_wikidata",
             "log_level",
             "rigor_mode",

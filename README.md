@@ -6,7 +6,7 @@
 
 <p align="center"><strong>OSINT MCP Server for Claude Desktop</strong></p>
 
-Ignifer is a Model Context Protocol (MCP) server that provides Claude Desktop with powerful Open Source Intelligence (OSINT) capabilities. It aggregates six authoritative data sources into a unified interface, enabling comprehensive intelligence briefings, entity research, transportation tracking, sanctions screening, and multi-source deep dive analysis directly within your Claude conversations.
+Ignifer is a Model Context Protocol (MCP) server that provides Claude Desktop with powerful Open Source Intelligence (OSINT) capabilities. It aggregates five authoritative data sources into a unified interface, enabling comprehensive intelligence briefings, entity research, transportation tracking, and multi-source deep dive analysis directly within your Claude conversations.
 
 ## Features
 
@@ -41,13 +41,6 @@ Real-time vessel tracking via AISStream:
 - Destination and ETA information
 - Vessel type and flag state
 
-### Sanctions Screening
-Entity screening against global sanctions lists via OpenSanctions:
-- OFAC SDN, EU, UN, and national sanctions lists
-- Politically Exposed Persons (PEP) identification
-- Associated entities and ownership chains
-- Match confidence scoring
-
 ### Multi-Source Deep Dive
 Comprehensive analysis correlating all available sources:
 - Automatic source selection based on query type
@@ -74,11 +67,10 @@ Toggle enhanced analytical output for professional analysts:
 | **Wikidata** | Entity information | High | No |
 | **OpenSky** | Aviation tracking | High | Yes (free) |
 | **AISStream** | Maritime tracking | High | Yes (free) |
-| **OpenSanctions** | Sanctions data | High | No |
 
 ## MCP Tools
 
-Ignifer exposes eight tools to Claude Desktop:
+Ignifer exposes seven tools to Claude Desktop:
 
 ### `briefing`
 Generate OSINT intelligence briefings on any topic.
@@ -189,27 +181,6 @@ track_vessel(identifier: str, rigor: bool | None = None) -> str
 
 ---
 
-### `sanctions_check`
-Screen any entity against global sanctions lists.
-
-```
-sanctions_check(entity: str, rigor: bool | None = None) -> str
-```
-
-**Parameters:**
-- `entity` - Entity name (person, company, vessel, etc.)
-- `rigor` - Enable IC-standard output with match confidence percentages
-
-**Returns:** Match results with sanctions lists, PEP status, associated entities, and match confidence.
-
-**Example:**
-```
-sanctions_check("Rosneft")
-sanctions_check("Alisher Usmanov", rigor=True)  # Shows explicit match confidence
-```
-
----
-
 ### `deep_dive`
 Comprehensive multi-source analysis correlating all available data sources.
 
@@ -219,7 +190,7 @@ deep_dive(topic: str, focus: str | None = None, rigor: bool | None = None) -> st
 
 **Parameters:**
 - `topic` - The subject to analyze (country, person, organization, vessel, event)
-- `focus` - Optional focus area to emphasize (e.g., "sanctions", "economic", "entity")
+- `focus` - Optional focus area to emphasize (e.g., "economic", "entity", "aviation", "maritime")
 - `rigor` - Enable IC-standard output with full source attribution and bibliography
 
 **Returns:** Comprehensive analysis with:
@@ -227,14 +198,13 @@ deep_dive(topic: str, focus: str | None = None, rigor: bool | None = None) -> st
 - News & events (GDELT)
 - Economic context (World Bank)
 - Entity profiles (Wikidata)
-- Sanctions status (OpenSanctions)
 - Corroboration notes where sources agree
 - Conflict markers where sources disagree
 
 **Example:**
 ```
 deep_dive("Myanmar")
-deep_dive("Iran", focus="sanctions")
+deep_dive("Venezuela", focus="economic")
 deep_dive("Roman Abramovich", rigor=True)  # Full IC-standard analysis
 ```
 
@@ -372,8 +342,7 @@ ignifer/
 │   ├── worldbank.py       # World Bank economic data adapter
 │   ├── wikidata.py        # Wikidata entity adapter
 │   ├── opensky.py         # OpenSky aviation adapter
-│   ├── aisstream.py       # AISStream maritime adapter
-│   └── opensanctions.py   # OpenSanctions sanctions adapter
+│   └── aisstream.py       # AISStream maritime adapter
 ├── aggregation/
 │   ├── entity_resolver.py # Tiered entity resolution system
 │   ├── relevance.py       # Source relevance engine
@@ -412,7 +381,6 @@ Ignifer uses SQLite-based caching with source-specific TTLs:
 - Wikidata: 7 days
 - OpenSky: 5 minutes
 - AISStream: 15 minutes
-- OpenSanctions: 24 hours
 
 ### Error Handling
 
@@ -463,12 +431,16 @@ uv run pytest tests/adapters/test_gdelt.py -v
 ### Completed
 - Phase 1: Zero-Config OSINT (GDELT, World Bank, Wikidata)
 - Phase 2: Transportation Tracking (OpenSky, AISStream)
-- Phase 3: Security Intelligence (OpenSanctions)
-- Phase 4: Multi-Source Correlation & Rigor Mode
+- Phase 3: Multi-Source Correlation & Rigor Mode
 
 ### Planned
-- Phase 5: System Administration & Power Features
-- Phase 6: Visualization
+- Enhancements to briefing tool (categorization/evaluation of sources, ability to uprank/downrank, gap analysis)
+- Enhancements to economic tool (trade network/resource security)
+- Social media monitoring/trend analysis
+- Infrastructure monitoring (power/internet/telecom outages)
+- Strategic modeling (scenario modeling/actor capability/strategic impact)
+- System Administration & Power Features
+- Visualization
 
 ## License
 

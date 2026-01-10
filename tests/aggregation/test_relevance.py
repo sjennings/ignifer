@@ -240,20 +240,6 @@ class TestPersonQueryDetection:
         assert "entity" in reasoning_lower or "people" in reasoning_lower
 
     @pytest.mark.asyncio
-    async def test_person_query_ranks_opensanctions_high(
-        self, engine: SourceRelevanceEngine
-    ) -> None:
-        """Person query should rank OpenSanctions as HIGH."""
-        result = await engine.analyze("Background check on this oligarch")
-
-        opensanctions = next(
-            s for s in result.sources if s.source_name == "opensanctions"
-        )
-        assert opensanctions.score == RelevanceScore.HIGH
-        reasoning_lower = opensanctions.reasoning.lower()
-        assert "sanctions" in reasoning_lower or "pep" in reasoning_lower
-
-    @pytest.mark.asyncio
     async def test_person_query_ranks_gdelt_medium(
         self, engine: SourceRelevanceEngine
     ) -> None:
@@ -307,18 +293,6 @@ class TestVesselQueryDetection:
 
         wikidata = next(s for s in result.sources if s.source_name == "wikidata")
         assert wikidata.score == RelevanceScore.HIGH
-
-    @pytest.mark.asyncio
-    async def test_vessel_query_ranks_opensanctions_high(
-        self, engine: SourceRelevanceEngine
-    ) -> None:
-        """Vessel query should rank OpenSanctions as HIGH."""
-        result = await engine.analyze("Is this vessel sanctioned MMSI 123456789")
-
-        opensanctions = next(
-            s for s in result.sources if s.source_name == "opensanctions"
-        )
-        assert opensanctions.score == RelevanceScore.HIGH
 
     @pytest.mark.asyncio
     async def test_vessel_query_detects_imo_pattern(
@@ -443,18 +417,6 @@ class TestOrganizationQueryDetection:
         assert wikidata.score == RelevanceScore.HIGH
 
     @pytest.mark.asyncio
-    async def test_organization_query_ranks_opensanctions_high(
-        self, engine: SourceRelevanceEngine
-    ) -> None:
-        """Organization query should rank OpenSanctions as HIGH."""
-        result = await engine.analyze("Is this corporation sanctioned")
-
-        opensanctions = next(
-            s for s in result.sources if s.source_name == "opensanctions"
-        )
-        assert opensanctions.score == RelevanceScore.HIGH
-
-    @pytest.mark.asyncio
     async def test_organization_query_detects_type(
         self, engine: SourceRelevanceEngine
     ) -> None:
@@ -514,7 +476,6 @@ class TestSourceAvailability:
         assert "gdelt" in result.available_sources
         assert "worldbank" in result.available_sources
         assert "wikidata" in result.available_sources
-        assert "opensanctions" in result.available_sources
 
     @pytest.mark.asyncio
     async def test_auth_required_sources_unavailable_without_credentials(
@@ -581,7 +542,6 @@ class TestSourceRanking:
             "wikidata",
             "opensky",
             "aisstream",
-            "opensanctions",
         }
 
         assert source_names == expected_sources
@@ -636,14 +596,9 @@ class TestRelevanceReasons:
         result = await engine.analyze("Who is this oligarch politician")
 
         wikidata = next(s for s in result.sources if s.source_name == "wikidata")
-        opensanctions = next(
-            s for s in result.sources if s.source_name == "opensanctions"
-        )
 
         wikidata_reasoning = wikidata.reasoning.lower()
-        opensanctions_reasoning = opensanctions.reasoning.lower()
         assert "entity" in wikidata_reasoning or "people" in wikidata_reasoning
-        assert "sanctions" in opensanctions_reasoning or "pep" in opensanctions_reasoning
 
 
 class TestQueryParams:

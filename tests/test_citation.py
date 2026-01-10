@@ -144,10 +144,6 @@ class TestSourceDisplayNames:
         """AISStream should have proper display name."""
         assert SOURCE_DISPLAY_NAMES["aisstream"] == "AISStream"
 
-    def test_opensanctions_display_name(self) -> None:
-        """OpenSanctions should have proper display name."""
-        assert SOURCE_DISPLAY_NAMES["opensanctions"] == "OpenSanctions"
-
     def test_all_sources_have_display_names(self) -> None:
         """All sources should have display names defined."""
         expected_sources = [
@@ -156,7 +152,6 @@ class TestSourceDisplayNames:
             "wikidata",
             "opensky",
             "aisstream",
-            "opensanctions",
         ]
         for source in expected_sources:
             assert source in SOURCE_DISPLAY_NAMES
@@ -181,7 +176,6 @@ class TestSourceTitles:
             "wikidata",
             "opensky",
             "aisstream",
-            "opensanctions",
         ]
         for source in expected_sources:
             assert source in SOURCE_TITLES
@@ -280,16 +274,6 @@ class TestFormatInline:
         )
         result = formatter.format_inline(source)
         assert result == "(AISStream, 2026-01-10)"
-
-    def test_opensanctions_inline(self, formatter: CitationFormatter) -> None:
-        """OpenSanctions inline citation should be formatted correctly."""
-        source = SourceMetadata(
-            source_name="opensanctions",
-            source_url="https://opensanctions.org/",
-            retrieved_at=datetime(2026, 1, 10, 14, 32, 0, tzinfo=timezone.utc),
-        )
-        result = formatter.format_inline(source)
-        assert result == "(OpenSanctions, 2026-01-10)"
 
     def test_unknown_source_inline(self, formatter: CitationFormatter) -> None:
         """Unknown source should use title case with underscores replaced by spaces."""
@@ -515,16 +499,16 @@ class TestFormatMultiSourceAttribution:
     def test_multi_source_without_corroboration(self, formatter: CitationFormatter) -> None:
         """Should work without corroboration notes when disabled."""
         contribution = SourceContribution(
-            source_name="opensanctions",
-            data={"sanctioned": True},
+            source_name="wikidata",
+            data={"entity": "Q12345"},
             quality_tier=QualityTier.HIGH,
             retrieved_at=datetime.now(timezone.utc),
-            source_url="https://opensanctions.org/",
+            source_url="https://www.wikidata.org/",
         )
         result = formatter.format_multi_source_attribution(
             [contribution], include_corroboration=False
         )
-        assert "OpenSanctions" in result
+        assert "Wikidata" in result
         # Should still indicate single source when include_corroboration is True by default
         # but not show corroboration details when disabled
 
@@ -556,7 +540,7 @@ class TestFormatMultiSourceAttribution:
                 retrieved_at=now,
             ),
             SourceContribution(
-                source_name="opensanctions",
+                source_name="wikidata",
                 data={},
                 quality_tier=QualityTier.HIGH,
                 retrieved_at=now,
@@ -565,7 +549,7 @@ class TestFormatMultiSourceAttribution:
         result = formatter.format_multi_source_attribution(contributions)
         assert "Recent events" in result
         assert "Economic indicators" in result
-        assert "Sanctions status" in result
+        assert "Entity information" in result
 
 
 class TestFormatWithDisclaimer:
@@ -744,8 +728,8 @@ class TestIntegration:
                 retrieved_at=now - timedelta(hours=12),
             ),
             SourceMetadata(
-                source_name="opensanctions",
-                source_url="https://api.opensanctions.org/",
+                source_name="wikidata",
+                source_url="https://www.wikidata.org/",
                 retrieved_at=now - timedelta(hours=2),
             ),
         ]
@@ -766,7 +750,7 @@ class TestIntegration:
         assert "Sources" in bibliography
         assert "GDELT Project" in bibliography
         assert "World Bank" in bibliography
-        assert "OpenSanctions" in bibliography
+        assert "Wikidata" in bibliography
         assert POINT_IN_TIME_DISCLAIMER in bibliography
 
     def test_citation_consistency(self, formatter: CitationFormatter) -> None:

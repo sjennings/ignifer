@@ -31,7 +31,6 @@ from ignifer.rigor import (
     format_entity_match_confidence,
     format_rigor_header,
     format_rigor_output,
-    format_sanctions_match_confidence,
     format_source_attribution,
     resolve_rigor_mode,
 )
@@ -274,32 +273,6 @@ class TestFormatEntityMatchConfidence:
 
         assert "Name match" in result
         assert "Type verified" in result
-
-
-class TestFormatSanctionsMatchConfidence:
-    """Tests for format_sanctions_match_confidence function (FR31)."""
-
-    def test_high_confidence_assessment(self) -> None:
-        """High confidence should indicate likely match."""
-        result = format_sanctions_match_confidence(
-            match_score=0.95,
-            entity_name="Rosneft",
-            matched_name="Rosneft Oil Company",
-        )
-
-        assert "95%" in result
-        assert "HIGH confidence" in result
-        assert "Rosneft" in result
-
-    def test_low_confidence_requires_verification(self) -> None:
-        """Low confidence should recommend verification."""
-        result = format_sanctions_match_confidence(
-            match_score=0.45,
-            entity_name="Generic Company",
-            matched_name="Generic Company Ltd",
-        )
-
-        assert "verification" in result.lower()
 
 
 class TestFormatRigorOutput:

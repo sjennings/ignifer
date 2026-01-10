@@ -66,8 +66,8 @@ class TestSourceContribution:
     def test_source_contribution_optional_confidence(self) -> None:
         """SourceContribution should accept optional confidence field."""
         contribution = SourceContribution(
-            source_name="opensanctions",
-            data={"sanctioned": True},
+            source_name="wikidata",
+            data={"entity": "Q12345"},
             quality_tier=QualityTier.HIGH,
             retrieved_at=datetime.now(timezone.utc),
             confidence=ConfidenceLevel.VERY_LIKELY,
@@ -117,25 +117,25 @@ class TestFinding:
         """Corroborated finding should have positive confidence boost."""
         contributions = [
             SourceContribution(
-                source_name="opensanctions",
-                data={"sanctioned": True},
-                quality_tier=QualityTier.HIGH,
+                source_name="gdelt",
+                data={"title": "News about entity"},
+                quality_tier=QualityTier.MEDIUM,
                 retrieved_at=datetime.now(timezone.utc),
             ),
             SourceContribution(
                 source_name="wikidata",
-                data={"status": "sanctioned"},
+                data={"entity": "Q12345"},
                 quality_tier=QualityTier.HIGH,
                 retrieved_at=datetime.now(timezone.utc),
             ),
         ]
 
         finding = Finding(
-            topic="sanctions",
-            content="Entity is sanctioned",
+            topic="entity",
+            content="Entity confirmed",
             sources=contributions,
             status=CorroborationStatus.CORROBORATED,
-            corroboration_note="Corroborated by [opensanctions, wikidata]",
+            corroboration_note="Corroborated by [gdelt, wikidata]",
             confidence_boost=0.2,
         )
 
@@ -201,59 +201,59 @@ class TestConflict:
     def test_conflict_creation(self) -> None:
         """Conflict should be created with all required fields."""
         source_a = SourceContribution(
-            source_name="opensanctions",
-            data={"sanctioned": True},
+            source_name="worldbank",
+            data={"gdp": 1000},
             quality_tier=QualityTier.HIGH,
             retrieved_at=datetime.now(timezone.utc),
         )
 
         source_b = SourceContribution(
             source_name="wikidata",
-            data={"sanctioned": False},
+            data={"gdp": 900},
             quality_tier=QualityTier.HIGH,
             retrieved_at=datetime.now(timezone.utc),
         )
 
         conflict = Conflict(
-            topic="sanctioned",
+            topic="gdp",
             source_a=source_a,
-            source_a_value="True",
+            source_a_value="1000",
             source_b=source_b,
-            source_b_value="False",
+            source_b_value="900",
             suggested_authority=None,
         )
 
-        assert conflict.topic == "sanctioned"
-        assert conflict.source_a_value == "True"
-        assert conflict.source_b_value == "False"
+        assert conflict.topic == "gdp"
+        assert conflict.source_a_value == "1000"
+        assert conflict.source_b_value == "900"
 
     def test_conflict_with_suggested_authority(self) -> None:
         """Conflict should include suggested authority when quality differs."""
         source_a = SourceContribution(
-            source_name="opensanctions",
-            data={"sanctioned": True},
+            source_name="worldbank",
+            data={"gdp": 1000},
             quality_tier=QualityTier.HIGH,
             retrieved_at=datetime.now(timezone.utc),
         )
 
         source_b = SourceContribution(
             source_name="news_source",
-            data={"sanctioned": False},
+            data={"gdp": 800},
             quality_tier=QualityTier.LOW,
             retrieved_at=datetime.now(timezone.utc),
         )
 
         conflict = Conflict(
-            topic="sanctioned",
+            topic="gdp",
             source_a=source_a,
-            source_a_value="True",
+            source_a_value="1000",
             source_b=source_b,
-            source_b_value="False",
-            suggested_authority="opensanctions",
-            resolution_note="Conflicting: opensanctions says True, news_source says False",
+            source_b_value="800",
+            suggested_authority="worldbank",
+            resolution_note="Conflicting: worldbank says 1000, news_source says 800",
         )
 
-        assert conflict.suggested_authority == "opensanctions"
+        assert conflict.suggested_authority == "worldbank"
 
     def test_conflict_resolution_note_format(self) -> None:
         """Conflict resolution_note should follow the required format."""
@@ -288,25 +288,25 @@ class TestConflict:
     def test_conflict_perspectives_property(self) -> None:
         """Conflict perspectives property should return list of both sources."""
         source_a = SourceContribution(
-            source_name="opensanctions",
-            data={"sanctioned": True},
+            source_name="worldbank",
+            data={"gdp": 1000},
             quality_tier=QualityTier.HIGH,
             retrieved_at=datetime.now(timezone.utc),
         )
 
         source_b = SourceContribution(
             source_name="wikidata",
-            data={"sanctioned": False},
+            data={"gdp": 900},
             quality_tier=QualityTier.HIGH,
             retrieved_at=datetime.now(timezone.utc),
         )
 
         conflict = Conflict(
-            topic="sanctioned",
+            topic="gdp",
             source_a=source_a,
-            source_a_value="True",
+            source_a_value="1000",
             source_b=source_b,
-            source_b_value="False",
+            source_b_value="900",
         )
 
         perspectives = conflict.perspectives
@@ -444,14 +444,14 @@ def mock_gdelt_adapter() -> MagicMock:
 
 
 @pytest.fixture
-def mock_opensanctions_adapter() -> MagicMock:
-    """Create a mock OpenSanctions adapter."""
+def mock_worldbank_adapter() -> MagicMock:
+    """Create a mock World Bank adapter."""
     return make_mock_adapter(
-        "opensanctions",
+        "worldbank",
         QualityTier.HIGH,
         [
-            {"name": "Entity X", "sanctioned": True, "topic": "sanctions"},
-            {"name": "Entity Z", "pep": True, "topic": "pep"},
+            {"name": "Entity X", "gdp": 1000, "topic": "sanctions"},
+            {"name": "Country Y", "gdp": 2000, "topic": "economic"},
         ],
     )
 
@@ -477,13 +477,13 @@ def mock_failing_adapter() -> MagicMock:
 @pytest.fixture
 def correlator_with_mocks(
     mock_gdelt_adapter: MagicMock,
-    mock_opensanctions_adapter: MagicMock,
+    mock_worldbank_adapter: MagicMock,
     mock_wikidata_adapter: MagicMock,
 ) -> Correlator:
     """Create Correlator with mock adapters."""
     adapters = {
         "gdelt": mock_gdelt_adapter,
-        "opensanctions": mock_opensanctions_adapter,
+        "worldbank": mock_worldbank_adapter,
         "wikidata": mock_wikidata_adapter,
     }
     return Correlator(adapters=adapters)
@@ -524,28 +524,28 @@ class TestConcurrentSourceQuerying:
         """Correlator should query multiple sources concurrently."""
         result = await correlator_with_mocks.aggregate(
             "Test query",
-            sources=["gdelt", "opensanctions", "wikidata"],
+            sources=["gdelt", "worldbank", "wikidata"],
         )
 
         assert "gdelt" in result.sources_queried
-        assert "opensanctions" in result.sources_queried
+        assert "worldbank" in result.sources_queried
         assert "wikidata" in result.sources_queried
 
     @pytest.mark.asyncio
     async def test_all_adapters_called(
         self,
         mock_gdelt_adapter: MagicMock,
-        mock_opensanctions_adapter: MagicMock,
+        mock_worldbank_adapter: MagicMock,
         correlator_with_mocks: Correlator,
     ) -> None:
         """All specified adapters should be called."""
         await correlator_with_mocks.aggregate(
             "Test query",
-            sources=["gdelt", "opensanctions"],
+            sources=["gdelt", "worldbank"],
         )
 
         mock_gdelt_adapter.query.assert_called_once()
-        mock_opensanctions_adapter.query.assert_called_once()
+        mock_worldbank_adapter.query.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_missing_adapter_handled(self, correlator_with_mocks: Correlator) -> None:
@@ -604,20 +604,20 @@ class TestAdapterFailureHandling:
     async def test_partial_failure_includes_successful_results(
         self,
         mock_gdelt_adapter: MagicMock,
-        mock_opensanctions_adapter: MagicMock,
+        mock_worldbank_adapter: MagicMock,
         mock_failing_adapter: MagicMock,
     ) -> None:
         """Partial failure should include results from successful sources."""
         adapters = {
             "gdelt": mock_gdelt_adapter,
-            "opensanctions": mock_opensanctions_adapter,
+            "worldbank": mock_worldbank_adapter,
             "failing_source": mock_failing_adapter,
         }
         correlator = Correlator(adapters=adapters)
 
         result = await correlator.aggregate(
             "Test query",
-            sources=["gdelt", "opensanctions", "failing_source"],
+            sources=["gdelt", "worldbank", "failing_source"],
         )
 
         assert len(result.sources_queried) == 2
@@ -635,10 +635,10 @@ class TestCorroborationDetection:
         """When 2+ sources agree, findings should be marked as corroborated."""
         result = await correlator_with_mocks.aggregate(
             "Test query",
-            sources=["gdelt", "opensanctions", "wikidata"],
+            sources=["gdelt", "worldbank", "wikidata"],
         )
 
-        # Check corroborated findings (sanctions topic has data from multiple sources)
+        # Check corroborated findings (Entity X topic has data from multiple sources)
         corroborated = [f for f in result.findings if f.status == CorroborationStatus.CORROBORATED]
         assert len(corroborated) > 0
 
@@ -656,7 +656,7 @@ class TestCorroborationDetection:
         """Corroborated findings should have sources from multiple adapters."""
         result = await correlator_with_mocks.aggregate(
             "Test query",
-            sources=["gdelt", "opensanctions", "wikidata"],
+            sources=["gdelt", "worldbank", "wikidata"],
         )
 
         corroborated = [f for f in result.findings if f.status == CorroborationStatus.CORROBORATED]
@@ -670,7 +670,7 @@ class TestCorroborationDetection:
         """Corroborated findings should have positive confidence boost."""
         result = await correlator_with_mocks.aggregate(
             "Test query",
-            sources=["gdelt", "opensanctions", "wikidata"],
+            sources=["gdelt", "worldbank", "wikidata"],
         )
 
         corroborated = [f for f in result.findings if f.status == CorroborationStatus.CORROBORATED]
@@ -713,15 +713,15 @@ class TestSingleSourceHandling:
     async def test_single_source_no_confidence_boost(self) -> None:
         """Single source findings should not have confidence boost."""
         adapter = make_mock_adapter(
-            "opensanctions",
+            "worldbank",
             QualityTier.HIGH,
             [{"name": "Entity", "topic": "standalone_topic"}],
         )
-        correlator = Correlator(adapters={"opensanctions": adapter})
+        correlator = Correlator(adapters={"worldbank": adapter})
 
         result = await correlator.aggregate(
             "Test query",
-            sources=["opensanctions"],
+            sources=["worldbank"],
         )
 
         for finding in result.findings:
@@ -729,7 +729,7 @@ class TestSingleSourceHandling:
             assert finding.confidence_boost == 0.0
             # Verify corroboration_note includes source name
             assert finding.corroboration_note is not None
-            assert "opensanctions" in finding.corroboration_note
+            assert "worldbank" in finding.corroboration_note
 
 
 class TestConflictDetection:
@@ -739,7 +739,7 @@ class TestConflictDetection:
     async def test_conflicts_detected_when_sources_disagree(self) -> None:
         """Conflicts should be detected when sources have different values."""
         adapter_a = make_mock_adapter(
-            "opensanctions",
+            "worldbank",
             QualityTier.HIGH,
             [{"name": "Entity X", "sanctioned": True}],
         )
@@ -750,14 +750,14 @@ class TestConflictDetection:
         )
         correlator = Correlator(
             adapters={
-                "opensanctions": adapter_a,
+                "worldbank": adapter_a,
                 "wikidata": adapter_b,
             }
         )
 
         result = await correlator.aggregate(
             "Test query",
-            sources=["opensanctions", "wikidata"],
+            sources=["worldbank", "wikidata"],
         )
 
         assert len(result.conflicts) > 0
@@ -878,7 +878,7 @@ class TestConfidenceCalculation:
         """Corroborated findings should increase overall confidence."""
         result = await correlator_with_mocks.aggregate(
             "Test query",
-            sources=["gdelt", "opensanctions", "wikidata"],
+            sources=["gdelt", "worldbank", "wikidata"],
         )
 
         # With corroborated findings, confidence should be higher
@@ -925,7 +925,7 @@ class TestConfidenceCalculation:
         """Confidence should always be between 0.0 and 1.0."""
         result = await correlator_with_mocks.aggregate(
             "Test query",
-            sources=["gdelt", "opensanctions", "wikidata"],
+            sources=["gdelt", "worldbank", "wikidata"],
         )
 
         assert 0.0 <= result.overall_confidence <= 1.0
@@ -939,13 +939,13 @@ class TestSourceAttribution:
         """Source attributions should be included in result."""
         result = await correlator_with_mocks.aggregate(
             "Test query",
-            sources=["gdelt", "opensanctions"],
+            sources=["gdelt", "worldbank"],
         )
 
         assert len(result.source_attributions) >= 2
         source_names = {a.source_name for a in result.source_attributions}
         assert "gdelt" in source_names
-        assert "opensanctions" in source_names
+        assert "worldbank" in source_names
 
     @pytest.mark.asyncio
     async def test_source_attribution_has_quality_tier(
@@ -954,7 +954,7 @@ class TestSourceAttribution:
         """Source attributions should include quality tier."""
         result = await correlator_with_mocks.aggregate(
             "Test query",
-            sources=["gdelt", "opensanctions"],
+            sources=["gdelt", "worldbank"],
         )
 
         for attribution in result.source_attributions:
@@ -980,12 +980,12 @@ class TestRelevanceEngineIntegration:
     async def test_uses_relevance_engine_when_no_sources_specified(
         self,
         mock_gdelt_adapter: MagicMock,
-        mock_opensanctions_adapter: MagicMock,
+        mock_worldbank_adapter: MagicMock,
     ) -> None:
         """Should use relevance engine to select sources when none specified."""
         adapters = {
             "gdelt": mock_gdelt_adapter,
-            "opensanctions": mock_opensanctions_adapter,
+            "worldbank": mock_worldbank_adapter,
         }
         correlator = Correlator(adapters=adapters)
 
@@ -999,13 +999,13 @@ class TestRelevanceEngineIntegration:
     async def test_uses_provided_sources_when_specified(
         self,
         mock_gdelt_adapter: MagicMock,
-        mock_opensanctions_adapter: MagicMock,
+        mock_worldbank_adapter: MagicMock,
         mock_wikidata_adapter: MagicMock,
     ) -> None:
         """Should use only provided sources when specified."""
         adapters = {
             "gdelt": mock_gdelt_adapter,
-            "opensanctions": mock_opensanctions_adapter,
+            "worldbank": mock_worldbank_adapter,
             "wikidata": mock_wikidata_adapter,
         }
         correlator = Correlator(adapters=adapters)
@@ -1016,7 +1016,7 @@ class TestRelevanceEngineIntegration:
         )
 
         assert "gdelt" in result.sources_queried
-        assert "opensanctions" not in result.sources_queried
+        assert "worldbank" not in result.sources_queried
         assert "wikidata" not in result.sources_queried
 
 

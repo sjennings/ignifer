@@ -97,7 +97,6 @@ SOURCE_DISPLAY_NAMES: dict[str, str] = {
     "wikidata": "Wikidata",
     "opensky": "OpenSky Network",
     "aisstream": "AISStream",
-    "opensanctions": "OpenSanctions",
 }
 
 # Dataset titles for bibliography entries
@@ -107,7 +106,6 @@ SOURCE_TITLES: dict[str, str] = {
     "wikidata": "Wikidata Knowledge Base",
     "opensky": "OpenSky Network ADS-B Data",
     "aisstream": "AISStream Maritime AIS Data",
-    "opensanctions": "OpenSanctions Consolidated Sanctions Database",
 }
 
 # Standard disclaimer text
@@ -343,7 +341,6 @@ class CitationFormatter:
             "wikidata": "Entity information",
             "opensky": "Flight tracking",
             "aisstream": "Maritime tracking",
-            "opensanctions": "Sanctions status",
         }
 
         return type_mapping.get(source_name, f"{source.source_name} data")
