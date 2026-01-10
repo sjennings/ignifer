@@ -97,7 +97,6 @@ SOURCE_DISPLAY_NAMES: dict[str, str] = {
     "wikidata": "Wikidata",
     "opensky": "OpenSky Network",
     "aisstream": "AISStream",
-    "acled": "Armed Conflict Location & Event Data Project (ACLED)",
     "opensanctions": "OpenSanctions",
 }
 
@@ -108,7 +107,6 @@ SOURCE_TITLES: dict[str, str] = {
     "wikidata": "Wikidata Knowledge Base",
     "opensky": "OpenSky Network ADS-B Data",
     "aisstream": "AISStream Maritime AIS Data",
-    "acled": "Armed Conflict Location & Event Data Project",
     "opensanctions": "OpenSanctions Consolidated Sanctions Database",
 }
 
@@ -345,7 +343,6 @@ class CitationFormatter:
             "wikidata": "Entity information",
             "opensky": "Flight tracking",
             "aisstream": "Maritime tracking",
-            "acled": "Conflict data",
             "opensanctions": "Sanctions status",
         }
 

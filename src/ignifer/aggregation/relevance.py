@@ -78,47 +78,6 @@ class RelevanceResult(BaseModel):
         ]
 
 
-# Conflict-prone regions for ACLED relevance boosting
-CONFLICT_REGIONS: set[str] = {
-    # Africa
-    "ethiopia",
-    "sudan",
-    "south sudan",
-    "somalia",
-    "nigeria",
-    "mali",
-    "burkina faso",
-    "niger",
-    "chad",
-    "cameroon",
-    "democratic republic of congo",
-    "drc",
-    "congo",
-    "central african republic",
-    "mozambique",
-    "libya",
-    # Middle East
-    "syria",
-    "yemen",
-    "iraq",
-    "afghanistan",
-    "palestine",
-    "gaza",
-    "israel",
-    "lebanon",
-    # Eastern Europe
-    "ukraine",
-    # Asia
-    "myanmar",
-    "burma",
-    "philippines",
-    # Latin America
-    "colombia",
-    "venezuela",
-    "mexico",
-    "haiti",
-}
-
 # Country name patterns
 COUNTRY_KEYWORDS: set[str] = {
     "country",
@@ -318,7 +277,6 @@ class SourceRelevanceEngine:
         "wikidata",
         "opensky",
         "aisstream",
-        "acled",
         "opensanctions",
     )
 
@@ -528,17 +486,6 @@ class SourceRelevanceEngine:
 
         return False
 
-    def _is_conflict_region(self, query_lower: str) -> bool:
-        """Check if query mentions a conflict-prone region.
-
-        Args:
-            query_lower: Lowercase query text.
-
-        Returns:
-            True if query mentions a conflict region.
-        """
-        return any(region in query_lower for region in CONFLICT_REGIONS)
-
     def _score_source(
         self, source_name: str, query_type: QueryType, query: str
     ) -> tuple[RelevanceScore, str]:
@@ -564,8 +511,6 @@ class SourceRelevanceEngine:
             return self._score_opensky(query_type, query_lower)
         elif source_name == "aisstream":
             return self._score_aisstream(query_type, query_lower)
-        elif source_name == "acled":
-            return self._score_acled(query_type, query_lower)
         elif source_name == "opensanctions":
             return self._score_opensanctions(query_type, query_lower)
         else:
@@ -696,30 +641,6 @@ class SourceRelevanceEngine:
         else:
             return RelevanceScore.LOW, "AISStream is specific to vessel tracking"
 
-    def _score_acled(
-        self, query_type: QueryType, query_lower: str
-    ) -> tuple[RelevanceScore, str]:
-        """Score ACLED relevance.
-
-        Args:
-            query_type: Detected query type.
-            query_lower: Lowercase query text.
-
-        Returns:
-            Tuple of (RelevanceScore, reasoning).
-        """
-        if query_type == QueryType.COUNTRY:
-            if self._is_conflict_region(query_lower):
-                return (
-                    RelevanceScore.MEDIUM_HIGH,
-                    "ACLED has conflict data for this conflict-prone region",
-                )
-            return RelevanceScore.MEDIUM, "ACLED provides conflict event data for countries"
-        elif query_type == QueryType.PERSON:
-            return RelevanceScore.LOW, "ACLED focuses on conflict events, not individuals"
-        else:
-            return RelevanceScore.LOW, "ACLED focuses on conflict event data"
-
     def _score_opensanctions(
         self, query_type: QueryType, query_lower: str
     ) -> tuple[RelevanceScore, str]:
@@ -777,11 +698,6 @@ class SourceRelevanceEngine:
             if self._settings.has_aisstream_credentials():
                 return True, None
             return False, Settings.get_credential_error_message("aisstream")
-
-        if source_name == "acled":
-            if self._settings.has_acled_credentials():
-                return True, None
-            return False, Settings.get_credential_error_message("acled")
 
         # Unknown source - assume available
         return True, None

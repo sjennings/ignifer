@@ -6,7 +6,7 @@
 
 <p align="center"><strong>OSINT MCP Server for Claude Desktop</strong></p>
 
-Ignifer is a Model Context Protocol (MCP) server that provides Claude Desktop with powerful Open Source Intelligence (OSINT) capabilities. It aggregates seven authoritative data sources into a unified interface, enabling comprehensive intelligence briefings, entity research, transportation tracking, conflict analysis, sanctions screening, and multi-source deep dive analysis directly within your Claude conversations.
+Ignifer is a Model Context Protocol (MCP) server that provides Claude Desktop with powerful Open Source Intelligence (OSINT) capabilities. It aggregates six authoritative data sources into a unified interface, enabling comprehensive intelligence briefings, entity research, transportation tracking, sanctions screening, and multi-source deep dive analysis directly within your Claude conversations.
 
 ## Features
 
@@ -41,13 +41,6 @@ Real-time vessel tracking via AISStream:
 - Destination and ETA information
 - Vessel type and flag state
 
-### Conflict Analysis
-Armed conflict event data via ACLED:
-- Event counts and trends by type (battles, violence against civilians, protests)
-- Actor analysis (state forces, rebel groups, militias)
-- Fatality trends and geographic distribution
-- Regional hotspot identification
-
 ### Sanctions Screening
 Entity screening against global sanctions lists via OpenSanctions:
 - OFAC SDN, EU, UN, and national sanctions lists
@@ -81,12 +74,11 @@ Toggle enhanced analytical output for professional analysts:
 | **Wikidata** | Entity information | High | No |
 | **OpenSky** | Aviation tracking | High | Yes (free) |
 | **AISStream** | Maritime tracking | High | Yes (free) |
-| **ACLED** | Conflict events | High | Yes (free) |
 | **OpenSanctions** | Sanctions data | High | No |
 
 ## MCP Tools
 
-Ignifer exposes nine tools to Claude Desktop:
+Ignifer exposes eight tools to Claude Desktop:
 
 ### `briefing`
 Generate OSINT intelligence briefings on any topic.
@@ -106,7 +98,7 @@ briefing(topic: str, time_range: str | None = None, rigor: bool | None = None) -
 
 **Example:**
 ```
-briefing("Syria conflict", time_range="last 48 hours")
+briefing("Syria", time_range="last 48 hours")
 briefing("Ukraine", rigor=True)  # IC-standard output
 ```
 
@@ -197,24 +189,6 @@ track_vessel(identifier: str, rigor: bool | None = None) -> str
 
 ---
 
-### `conflict_analysis`
-Analyze conflict situations in any country or region.
-
-```
-conflict_analysis(region: str, time_range: str | None = None, rigor: bool | None = None) -> str
-```
-
-**Parameters:**
-- `region` - Country name or region
-- `time_range` - Optional time filter (same formats as briefing)
-- `rigor` - Enable IC-standard output with source quality assessments
-
-**Returns:** Conflict event summary with event types, actors, fatalities, and geographic distribution.
-
-**Note:** Requires ACLED account. Set `IGNIFER_ACLED_EMAIL` and `IGNIFER_ACLED_PASSWORD` environment variables. Register for free access at https://acleddata.com/register/
-
----
-
 ### `sanctions_check`
 Screen any entity against global sanctions lists.
 
@@ -245,14 +219,13 @@ deep_dive(topic: str, focus: str | None = None, rigor: bool | None = None) -> st
 
 **Parameters:**
 - `topic` - The subject to analyze (country, person, organization, vessel, event)
-- `focus` - Optional focus area to emphasize (e.g., "sanctions", "conflict", "economic")
+- `focus` - Optional focus area to emphasize (e.g., "sanctions", "economic", "entity")
 - `rigor` - Enable IC-standard output with full source attribution and bibliography
 
 **Returns:** Comprehensive analysis with:
 - Automatic source selection based on query type
 - News & events (GDELT)
 - Economic context (World Bank)
-- Conflict situation (ACLED)
 - Entity profiles (Wikidata)
 - Sanctions status (OpenSanctions)
 - Corroboration notes where sources agree
@@ -273,7 +246,7 @@ Rigor mode provides IC-standard analytical output suitable for professional inte
 
 **Per-query:** Add `rigor=True` to any tool call:
 ```
-briefing("Ukraine conflict", rigor=True)
+briefing("Ukraine", rigor=True)
 deep_dive("Venezuela", rigor=True)
 ```
 
@@ -371,10 +344,6 @@ export IGNIFER_OPENSKY_CLIENT_SECRET="your_client_secret"
 # AISStream (Maritime Tracking)
 export IGNIFER_AISSTREAM_KEY="your_api_key"
 
-# ACLED (Conflict Data - OAuth2)
-export IGNIFER_ACLED_EMAIL="your_email"
-export IGNIFER_ACLED_PASSWORD="your_password"
-
 # Rigor Mode (Optional - enables IC-standard output globally)
 export IGNIFER_RIGOR_MODE=true
 ```
@@ -390,10 +359,6 @@ opensky_client_secret = "your_client_secret"
 
 # AISStream API key
 aisstream_key = "your_api_key"
-
-# ACLED OAuth2 credentials
-acled_email = "your_email"
-acled_password = "your_password"
 ```
 
 ## Architecture
@@ -408,7 +373,6 @@ ignifer/
 │   ├── wikidata.py        # Wikidata entity adapter
 │   ├── opensky.py         # OpenSky aviation adapter
 │   ├── aisstream.py       # AISStream maritime adapter
-│   ├── acled.py           # ACLED conflict data adapter
 │   └── opensanctions.py   # OpenSanctions sanctions adapter
 ├── aggregation/
 │   ├── entity_resolver.py # Tiered entity resolution system
@@ -448,7 +412,6 @@ Ignifer uses SQLite-based caching with source-specific TTLs:
 - Wikidata: 7 days
 - OpenSky: 5 minutes
 - AISStream: 15 minutes
-- ACLED: 12 hours
 - OpenSanctions: 24 hours
 
 ### Error Handling
@@ -500,7 +463,7 @@ uv run pytest tests/adapters/test_gdelt.py -v
 ### Completed
 - Phase 1: Zero-Config OSINT (GDELT, World Bank, Wikidata)
 - Phase 2: Transportation Tracking (OpenSky, AISStream)
-- Phase 3: Security Intelligence (ACLED, OpenSanctions)
+- Phase 3: Security Intelligence (OpenSanctions)
 - Phase 4: Multi-Source Correlation & Rigor Mode
 
 ### Planned

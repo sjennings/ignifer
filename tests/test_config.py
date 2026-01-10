@@ -37,15 +37,6 @@ class TestSettingsFromEnvironment:
         assert settings.opensky_client_secret is not None
         assert settings.opensky_client_secret.get_secret_value() == "test_pass"
 
-    def test_acled_password_from_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """ACLED password should be loaded from environment variable."""
-        monkeypatch.setenv("IGNIFER_ACLED_PASSWORD", "acled_test_password")
-
-        settings = Settings()
-
-        assert settings.acled_password is not None
-        assert settings.acled_password.get_secret_value() == "acled_test_password"
-
     def test_aisstream_key_from_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """AISStream key should be loaded from environment variable."""
         monkeypatch.setenv("IGNIFER_AISSTREAM_KEY", "aisstream_test_key")
@@ -63,7 +54,6 @@ class TestSettingsFromEnvironment:
 
         assert settings.opensky_client_id is None
         assert settings.opensky_client_secret is None
-        assert settings.acled_password is None
         assert settings.aisstream_key is None
 
 
@@ -75,7 +65,6 @@ class TestSettingsFromConfigFile:
         config_content = """
 opensky_client_id = "file_user"
 opensky_client_secret = "file_pass"
-acled_password = "file_acled_password"
 aisstream_key = "file_aisstream_key"
 """
         config_file = tmp_path / "config.toml"
@@ -85,7 +74,6 @@ aisstream_key = "file_aisstream_key"
 
         assert config_data["opensky_client_id"] == "file_user"
         assert config_data["opensky_client_secret"] == "file_pass"
-        assert config_data["acled_password"] == "file_acled_password"
         assert config_data["aisstream_key"] == "file_aisstream_key"
 
     def test_missing_config_file_returns_empty_dict(self, tmp_path: Path) -> None:
@@ -174,22 +162,6 @@ class TestCredentialHelperMethods:
 
         assert settings.has_opensky_credentials() is False
 
-    def test_has_acled_credentials_true(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """has_acled_credentials returns True when both email and password are set."""
-        monkeypatch.setenv("IGNIFER_ACLED_EMAIL", "email@example.com")
-        monkeypatch.setenv("IGNIFER_ACLED_PASSWORD", "password")
-
-        settings = Settings()
-
-        assert settings.has_acled_credentials() is True
-
-    def test_has_acled_credentials_false(self, no_config_file) -> None:
-        """has_acled_credentials returns False when credentials are not set."""
-        with patch.dict(os.environ, {}, clear=True):
-            settings = Settings()
-
-        assert settings.has_acled_credentials() is False
-
     def test_has_aisstream_credentials_true(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """has_aisstream_credentials returns True when key is set."""
         monkeypatch.setenv("IGNIFER_AISSTREAM_KEY", "key")
@@ -209,14 +181,11 @@ class TestCredentialHelperMethods:
         """Empty string credentials should be treated as not configured."""
         monkeypatch.setenv("IGNIFER_OPENSKY_CLIENT_ID", "")
         monkeypatch.setenv("IGNIFER_OPENSKY_CLIENT_SECRET", "")
-        monkeypatch.setenv("IGNIFER_ACLED_EMAIL", "")
-        monkeypatch.setenv("IGNIFER_ACLED_PASSWORD", "")
         monkeypatch.setenv("IGNIFER_AISSTREAM_KEY", "")
 
         settings = Settings()
 
         assert settings.has_opensky_credentials() is False
-        assert settings.has_acled_credentials() is False
         assert settings.has_aisstream_credentials() is False
 
     def test_empty_username_with_valid_password_rejected(
@@ -241,15 +210,6 @@ class TestCredentialErrorMessages:
         assert "OpenSky requires OAuth2 authentication" in msg
         assert "IGNIFER_OPENSKY_CLIENT_ID" in msg
         assert "IGNIFER_OPENSKY_CLIENT_SECRET" in msg
-        assert "~/.config/ignifer/config.toml" in msg
-
-    def test_acled_error_message(self) -> None:
-        """ACLED error message should be helpful."""
-        msg = Settings.get_credential_error_message("acled")
-
-        assert "ACLED requires OAuth2 authentication" in msg
-        assert "IGNIFER_ACLED_EMAIL" in msg
-        assert "IGNIFER_ACLED_PASSWORD" in msg
         assert "~/.config/ignifer/config.toml" in msg
 
     def test_aisstream_error_message(self) -> None:
@@ -283,8 +243,6 @@ class TestCredentialSecrecy:
         """repr should mask credential values."""
         monkeypatch.setenv("IGNIFER_OPENSKY_CLIENT_ID", "secret_user")
         monkeypatch.setenv("IGNIFER_OPENSKY_CLIENT_SECRET", "secret_pass")
-        monkeypatch.setenv("IGNIFER_ACLED_EMAIL", "secret_email")
-        monkeypatch.setenv("IGNIFER_ACLED_PASSWORD", "secret_acled")
         monkeypatch.setenv("IGNIFER_AISSTREAM_KEY", "secret_ais")
 
         settings = Settings()
@@ -293,8 +251,6 @@ class TestCredentialSecrecy:
         # Credentials should not appear in repr
         assert "secret_user" not in repr_str
         assert "secret_pass" not in repr_str
-        assert "secret_email" not in repr_str
-        assert "secret_acled" not in repr_str
         assert "secret_ais" not in repr_str
         # But masked indication should be present
         assert "SecretStr('**********')" in repr_str
@@ -302,14 +258,14 @@ class TestCredentialSecrecy:
     def test_str_masks_credentials(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """str should mask credential values."""
         monkeypatch.setenv("IGNIFER_OPENSKY_CLIENT_ID", "secret_user")
-        monkeypatch.setenv("IGNIFER_ACLED_PASSWORD", "secret_acled")
+        monkeypatch.setenv("IGNIFER_AISSTREAM_KEY", "secret_ais")
 
         settings = Settings()
         str_repr = str(settings)
 
         # Credentials should not appear in str
         assert "secret_user" not in str_repr
-        assert "secret_acled" not in str_repr
+        assert "secret_ais" not in str_repr
 
     def test_repr_shows_none_for_unset_credentials(self, no_config_file) -> None:
         """repr should show None for unset credentials."""
@@ -391,7 +347,6 @@ ttl_opensky = 600
         assert settings.ttl_opensky == 300
         assert settings.ttl_aisstream == 900
         assert settings.ttl_worldbank == 86400
-        assert settings.ttl_acled == 43200
 
 
 class TestRigorModeSetting:

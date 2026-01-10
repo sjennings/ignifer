@@ -31,12 +31,6 @@ _CREDENTIAL_ERROR_MESSAGES: dict[str, str] = {
         "or configure opensky_client_id and opensky_client_secret in ~/.config/ignifer/config.toml. "
         "Create API credentials at https://opensky-network.org/account"
     ),
-    "acled": (
-        "ACLED requires OAuth2 authentication with email and password. "
-        "Set IGNIFER_ACLED_EMAIL and IGNIFER_ACLED_PASSWORD environment variables, "
-        "or configure acled_email and acled_password in ~/.config/ignifer/config.toml. "
-        "Register for free access at https://acleddata.com/register/"
-    ),
     "aisstream": (
         "AISStream requires an API key. "
         "Set IGNIFER_AISSTREAM_KEY environment variable, "
@@ -97,16 +91,12 @@ class Settings(BaseSettings):
     opensky_client_id: SecretStr | None = None
     opensky_client_secret: SecretStr | None = None
     aisstream_key: SecretStr | None = None
-    # ACLED OAuth2 credentials (email + password)
-    acled_email: SecretStr | None = None
-    acled_password: SecretStr | None = None
 
     # Cache TTL defaults (seconds)
     ttl_gdelt: int = 900  # 15 minutes (news is time-sensitive)
     ttl_opensky: int = 300  # 5 minutes
     ttl_aisstream: int = 900  # 15 minutes
     ttl_worldbank: int = 86400  # 24 hours
-    ttl_acled: int = 43200  # 12 hours
     ttl_opensanctions: int = 86400  # 24 hours
     ttl_wikidata: int = 604800  # 7 days
 
@@ -131,13 +121,10 @@ class Settings(BaseSettings):
             "opensky_client_id",
             "opensky_client_secret",
             "aisstream_key",
-            "acled_email",
-            "acled_password",
             "ttl_gdelt",
             "ttl_opensky",
             "ttl_aisstream",
             "ttl_worldbank",
-            "ttl_acled",
             "ttl_opensanctions",
             "ttl_wikidata",
             "log_level",
@@ -160,14 +147,6 @@ class Settings(BaseSettings):
         """
         return bool(self.opensky_client_id) and bool(self.opensky_client_secret)
 
-    def has_acled_credentials(self) -> bool:
-        """Check if ACLED OAuth2 credentials are configured.
-
-        Returns:
-            True if both ACLED email and password are non-empty, False otherwise
-        """
-        return bool(self.acled_email) and bool(self.acled_password)
-
     def has_aisstream_credentials(self) -> bool:
         """Check if AISStream API key is configured.
 
@@ -181,7 +160,7 @@ class Settings(BaseSettings):
         """Get a helpful error message for missing credentials.
 
         Args:
-            source: The data source name (opensky, acled, aisstream)
+            source: The data source name (opensky, aisstream)
 
         Returns:
             Human-readable error message explaining how to configure credentials
@@ -197,7 +176,7 @@ class Settings(BaseSettings):
         fields = []
         for name in type(self).model_fields:
             value = getattr(self, name)
-            if name in ("opensky_client_id", "opensky_client_secret", "aisstream_key", "acled_email", "acled_password"):
+            if name in ("opensky_client_id", "opensky_client_secret", "aisstream_key"):
                 # Mask credentials - show only if set or not
                 if value is not None:
                     fields.append(f"{name}=SecretStr('**********')")

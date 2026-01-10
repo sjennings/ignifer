@@ -155,8 +155,6 @@ def engine_with_all_credentials(monkeypatch: pytest.MonkeyPatch) -> SourceReleva
     monkeypatch.setenv("IGNIFER_OPENSKY_CLIENT_ID", "test")
     monkeypatch.setenv("IGNIFER_OPENSKY_CLIENT_SECRET", "test")
     monkeypatch.setenv("IGNIFER_AISSTREAM_KEY", "test")
-    monkeypatch.setenv("IGNIFER_ACLED_EMAIL", "test@test.com")
-    monkeypatch.setenv("IGNIFER_ACLED_PASSWORD", "test")
     reset_settings()
     engine = SourceRelevanceEngine()
     yield engine
@@ -170,8 +168,6 @@ def engine_no_credentials(monkeypatch: pytest.MonkeyPatch) -> SourceRelevanceEng
     monkeypatch.delenv("IGNIFER_OPENSKY_CLIENT_ID", raising=False)
     monkeypatch.delenv("IGNIFER_OPENSKY_CLIENT_SECRET", raising=False)
     monkeypatch.delenv("IGNIFER_AISSTREAM_KEY", raising=False)
-    monkeypatch.delenv("IGNIFER_ACLED_EMAIL", raising=False)
-    monkeypatch.delenv("IGNIFER_ACLED_PASSWORD", raising=False)
     # Also prevent loading from config file
     monkeypatch.setattr("ignifer.config._load_config_file", lambda *args, **kwargs: {})
     reset_settings()
@@ -213,27 +209,6 @@ class TestCountryQueryDetection:
         result = await engine.analyze("What's happening in Ukraine")
 
         assert result.query_type == "country"
-
-    @pytest.mark.asyncio
-    async def test_conflict_region_boosts_acled(
-        self, engine: SourceRelevanceEngine
-    ) -> None:
-        """Conflict-prone regions should boost ACLED to MEDIUM_HIGH."""
-        result = await engine.analyze("Analysis of Syria")
-
-        acled = next(s for s in result.sources if s.source_name == "acled")
-        assert acled.score == RelevanceScore.MEDIUM_HIGH
-        assert "conflict" in acled.reasoning.lower()
-
-    @pytest.mark.asyncio
-    async def test_non_conflict_region_acled_medium(
-        self, engine: SourceRelevanceEngine
-    ) -> None:
-        """Non-conflict regions should have ACLED at MEDIUM."""
-        result = await engine.analyze("Analysis of Japan")
-
-        acled = next(s for s in result.sources if s.source_name == "acled")
-        assert acled.score == RelevanceScore.MEDIUM
 
     @pytest.mark.asyncio
     async def test_country_query_ranks_tracking_sources_low(
@@ -551,7 +526,6 @@ class TestSourceAvailability:
         # These sources require authentication
         assert "opensky" in result.unavailable_sources
         assert "aisstream" in result.unavailable_sources
-        assert "acled" in result.unavailable_sources
 
     @pytest.mark.asyncio
     async def test_auth_required_sources_available_with_credentials(
@@ -563,7 +537,6 @@ class TestSourceAvailability:
         # All sources should be available
         assert "opensky" in result.available_sources
         assert "aisstream" in result.available_sources
-        assert "acled" in result.available_sources
         assert len(result.unavailable_sources) == 0
 
     @pytest.mark.asyncio
@@ -608,7 +581,6 @@ class TestSourceRanking:
             "wikidata",
             "opensky",
             "aisstream",
-            "acled",
             "opensanctions",
         }
 

@@ -192,12 +192,6 @@ class TestFormatAnalyticalCaveats:
         assert "GDELT" in result
         assert "Caveats" in result
 
-    def test_acled_caveat_generated(self) -> None:
-        """ACLED sources should generate reporting caveat."""
-        result = format_analytical_caveats(source_names=["acled"])
-
-        assert "ACLED" in result
-
     def test_custom_caveats_included(self) -> None:
         """Custom caveats should be included in output."""
         result = format_analytical_caveats(
@@ -348,7 +342,7 @@ class TestFormatRigorOutput:
             content="Content",
             sources=sources,
             include_corroboration=True,
-            corroboration_notes=["Finding corroborated by GDELT and ACLED"],
+            corroboration_notes=["Finding corroborated by GDELT and WorldBank"],
         )
 
         assert "Corroboration" in result

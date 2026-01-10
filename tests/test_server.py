@@ -245,13 +245,6 @@ class TestDeepDiveTool:
                     available=True,
                 ),
                 SourceRelevance(
-                    source_name="acled",
-                    score=RelevanceScore.MEDIUM_HIGH,
-                    reasoning="ACLED has conflict data",
-                    available=False,
-                    unavailable_reason="ACLED API key not configured",
-                ),
-                SourceRelevance(
                     source_name="wikidata",
                     score=RelevanceScore.MEDIUM,
                     reasoning="Wikidata provides entity context",
@@ -265,7 +258,7 @@ class TestDeepDiveTool:
                 ),
             ],
             available_sources=["gdelt", "worldbank", "wikidata", "opensanctions"],
-            unavailable_sources=["acled"],
+            unavailable_sources=[],
         )
 
     @pytest.fixture
@@ -430,29 +423,6 @@ class TestDeepDiveTool:
             assert "opensanctions" in sources_called or "gdelt" in sources_called
 
     @pytest.mark.asyncio
-    async def test_deep_dive_unavailable_sources_noted(
-        self, mock_relevance_result: RelevanceResult, mock_aggregated_result: AggregatedResult
-    ) -> None:
-        """Unavailable sources are noted in output."""
-        with (
-            patch("ignifer.server._get_relevance_engine") as mock_rel_engine,
-            patch("ignifer.server._get_correlator") as mock_correlator,
-        ):
-            rel_engine = MagicMock()
-            rel_engine.analyze = AsyncMock(return_value=mock_relevance_result)
-            mock_rel_engine.return_value = rel_engine
-
-            correlator = MagicMock()
-            correlator.aggregate = AsyncMock(return_value=mock_aggregated_result)
-            mock_correlator.return_value = correlator
-
-            result = await deep_dive.fn("Myanmar")
-
-            # Check that unavailable source is noted
-            assert "ACLED" in result or "acled" in result.lower()
-            assert "not configured" in result.lower() or "SOURCES NOT QUERIED" in result
-
-    @pytest.mark.asyncio
     async def test_deep_dive_empty_topic_returns_error(self) -> None:
         """Empty topic returns error message."""
         result = await deep_dive.fn("")
@@ -517,27 +487,27 @@ class TestDeepDiveTool:
             findings=[
                 Finding(
                     topic="conflict",
-                    content="Ongoing conflict in Myanmar",
+                    content="Ongoing situation in Myanmar",
                     sources=[
                         SourceContribution(
                             source_name="gdelt",
-                            data={"title": "Conflict"},
+                            data={"title": "News"},
                             quality_tier=QualityTier.MEDIUM,
                             retrieved_at=now,
                         ),
                         SourceContribution(
-                            source_name="acled",
-                            data={"event": "Violence"},
+                            source_name="worldbank",
+                            data={"indicator": "Economy"},
                             quality_tier=QualityTier.HIGH,
                             retrieved_at=now,
                         ),
                     ],
                     status=CorroborationStatus.CORROBORATED,
-                    corroboration_note="Corroborated by [gdelt, acled]",
+                    corroboration_note="Corroborated by [gdelt, worldbank]",
                 ),
             ],
             conflicts=[],
-            sources_queried=["gdelt", "acled"],
+            sources_queried=["gdelt", "worldbank"],
             sources_failed=[],
             overall_confidence=0.7,
             source_attributions=[],
@@ -554,13 +524,13 @@ class TestDeepDiveTool:
                     available=True,
                 ),
                 SourceRelevance(
-                    source_name="acled",
+                    source_name="worldbank",
                     score=RelevanceScore.HIGH,
-                    reasoning="Conflict data",
+                    reasoning="Economic data",
                     available=True,
                 ),
             ],
-            available_sources=["gdelt", "acled"],
+            available_sources=["gdelt", "worldbank"],
             unavailable_sources=[],
         )
 
@@ -663,7 +633,7 @@ class TestDeepDiveTool:
             query_type="general",
             sources=[
                 SourceRelevance(
-                    source_name="acled",
+                    source_name="opensky",
                     score=RelevanceScore.HIGH,
                     reasoning="Test",
                     available=False,
@@ -671,7 +641,7 @@ class TestDeepDiveTool:
                 ),
             ],
             available_sources=[],
-            unavailable_sources=["acled"],
+            unavailable_sources=["opensky"],
         )
 
         with patch("ignifer.server._get_relevance_engine") as mock_rel_engine:

@@ -156,7 +156,6 @@ def format_analytical_caveats(
     source_caveats = {
         "gdelt": "GDELT coverage may be incomplete for some languages/regions.",
         "worldbank": "World Bank data reflects latest available year, which may be 1-2 years old.",
-        "acled": "ACLED data reflects reported incidents; unreported events may occur.",
         "opensanctions": "Sanctions status reflects point-in-time; lists are updated frequently.",
         "opensky": "ADS-B coverage is not global; some flights may not be visible.",
         "aisstream": "AIS coverage varies; some vessels may disable transponders.",

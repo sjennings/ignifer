@@ -102,11 +102,11 @@ class TestAdapterErrors:
         assert error.details is None
 
     def test_auth_error_includes_details(self) -> None:
-        error = AdapterAuthError("acled", details="Invalid API key")
+        error = AdapterAuthError("opensky", details="Invalid API key")
         assert "Invalid API key" in str(error)
 
     def test_auth_error_without_details(self) -> None:
-        error = AdapterAuthError("acled")
+        error = AdapterAuthError("opensky")
         assert "Authentication failed" in str(error)
         assert error.details is None
 

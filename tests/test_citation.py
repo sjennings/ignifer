@@ -144,24 +144,18 @@ class TestSourceDisplayNames:
         """AISStream should have proper display name."""
         assert SOURCE_DISPLAY_NAMES["aisstream"] == "AISStream"
 
-    def test_acled_display_name(self) -> None:
-        """ACLED should have proper display name."""
-        expected = "Armed Conflict Location & Event Data Project (ACLED)"
-        assert SOURCE_DISPLAY_NAMES["acled"] == expected
-
     def test_opensanctions_display_name(self) -> None:
         """OpenSanctions should have proper display name."""
         assert SOURCE_DISPLAY_NAMES["opensanctions"] == "OpenSanctions"
 
-    def test_all_seven_sources_have_display_names(self) -> None:
-        """All 7 sources should have display names defined."""
+    def test_all_sources_have_display_names(self) -> None:
+        """All sources should have display names defined."""
         expected_sources = [
             "gdelt",
             "worldbank",
             "wikidata",
             "opensky",
             "aisstream",
-            "acled",
             "opensanctions",
         ]
         for source in expected_sources:
@@ -179,15 +173,14 @@ class TestSourceTitles:
         """World Bank should have proper title."""
         assert SOURCE_TITLES["worldbank"] == "World Development Indicators"
 
-    def test_all_seven_sources_have_titles(self) -> None:
-        """All 7 sources should have titles defined."""
+    def test_all_sources_have_titles(self) -> None:
+        """All sources should have titles defined."""
         expected_sources = [
             "gdelt",
             "worldbank",
             "wikidata",
             "opensky",
             "aisstream",
-            "acled",
             "opensanctions",
         ]
         for source in expected_sources:
@@ -287,16 +280,6 @@ class TestFormatInline:
         )
         result = formatter.format_inline(source)
         assert result == "(AISStream, 2026-01-10)"
-
-    def test_acled_inline(self, formatter: CitationFormatter) -> None:
-        """ACLED inline citation should be formatted correctly."""
-        source = SourceMetadata(
-            source_name="acled",
-            source_url="https://acleddata.com/",
-            retrieved_at=datetime(2026, 1, 10, 14, 32, 0, tzinfo=timezone.utc),
-        )
-        result = formatter.format_inline(source)
-        assert result == "(Armed Conflict Location & Event Data Project (ACLED), 2026-01-10)"
 
     def test_opensanctions_inline(self, formatter: CitationFormatter) -> None:
         """OpenSanctions inline citation should be formatted correctly."""
