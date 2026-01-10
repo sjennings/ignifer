@@ -19,10 +19,22 @@ from ignifer.adapters import (
     GDELTAdapter,
     OpenSanctionsAdapter,
     OpenSkyAdapter,
+    OSINTAdapter,
     WikidataAdapter,
     WorldBankAdapter,
 )
 from ignifer.aggregation import EntityResolver
+from ignifer.aggregation.correlator import (
+    AggregatedResult,
+    Conflict,
+    Correlator,
+    CorroborationStatus,
+    Finding,
+)
+from ignifer.aggregation.relevance import (
+    RelevanceScore,
+    SourceRelevanceEngine,
+)
 from ignifer.cache import CacheManager
 from ignifer.config import configure_logging, get_settings
 from ignifer.models import QueryParams, ResultStatus
@@ -49,6 +61,8 @@ _acled: ACLEDAdapter | None = None
 _opensanctions: OpenSanctionsAdapter | None = None
 _entity_resolver: EntityResolver | None = None
 _formatter: OutputFormatter | None = None
+_relevance_engine: SourceRelevanceEngine | None = None
+_correlator: Correlator | None = None
 
 
 def _get_cache() -> CacheManager:
@@ -121,12 +135,44 @@ def _get_formatter() -> OutputFormatter:
     return _formatter
 
 
+def _get_relevance_engine() -> SourceRelevanceEngine:
+    global _relevance_engine
+    if _relevance_engine is None:
+        _relevance_engine = SourceRelevanceEngine(get_settings())
+    return _relevance_engine
+
+
+def _get_correlator() -> Correlator:
+    global _correlator
+    if _correlator is None:
+        # Build adapters dict from existing getters
+        # Explicit type annotation for mypy compatibility
+        adapters: dict[str, OSINTAdapter] = {
+            "gdelt": _get_adapter(),
+            "worldbank": _get_worldbank(),
+            "wikidata": _get_wikidata(),
+            "opensky": _get_opensky(),
+            "aisstream": _get_aisstream(),
+            "acled": _get_acled(),
+            "opensanctions": _get_opensanctions(),
+        }
+        _correlator = Correlator(
+            adapters=adapters,
+            relevance_engine=_get_relevance_engine(),
+            settings=get_settings(),
+        )
+    return _correlator
+
+
 async def _cleanup_resources() -> None:
     """Close all open resources (adapters, cache connections)."""
     global _adapter, _worldbank, _wikidata, _opensky, _aisstream, _acled
     global _opensanctions, _entity_resolver, _cache
+    global _relevance_engine, _correlator
 
-    # Clear entity resolver first (it references wikidata adapter)
+    # Clear aggregation components first (they reference adapters)
+    _correlator = None
+    _relevance_engine = None
     _entity_resolver = None
 
     # Close adapters first, then cache (adapters may use cache)
@@ -3022,6 +3068,430 @@ async def sanctions_check(entity: str) -> str:
         return (
             f"## Error\n\n"
             f"An unexpected error occurred while screening **{entity_cleaned}**.\n\n"
+            f"Please try again later."
+        )
+
+
+# ============================================================================
+# DEEP DIVE MULTI-SOURCE ANALYSIS TOOL
+# ============================================================================
+
+
+# Focus area to source mapping for boosting relevance
+FOCUS_SOURCE_BOOST: dict[str, list[str]] = {
+    "sanctions": ["opensanctions", "gdelt"],
+    "conflict": ["acled", "gdelt"],
+    "economic": ["worldbank", "gdelt"],
+    "entity": ["wikidata", "opensanctions"],
+    "news": ["gdelt"],
+    "aviation": ["opensky", "wikidata", "gdelt"],
+    "maritime": ["aisstream", "wikidata", "opensanctions", "gdelt"],
+}
+
+# Confidence level labels for display
+CONFIDENCE_LABELS: dict[str, str] = {
+    "ALMOST_CERTAIN": "ALMOST CERTAIN (95%+)",
+    "VERY_LIKELY": "VERY LIKELY (80-94%)",
+    "LIKELY": "LIKELY (60-79%)",
+    "EVEN_CHANCE": "EVEN CHANCE (40-59%)",
+    "UNLIKELY": "UNLIKELY (20-39%)",
+    "REMOTE": "REMOTE (<20%)",
+}
+
+
+def _format_deep_dive_header(
+    topic: str,
+    sources_queried: list[str],
+    timestamp: str,
+) -> str:
+    """Format the header section of a deep dive report.
+
+    Args:
+        topic: The topic being analyzed
+        sources_queried: List of source names that were queried
+        timestamp: UTC timestamp string
+
+    Returns:
+        Formatted header string
+    """
+    sources_str = ", ".join(s.upper() for s in sources_queried) if sources_queried else "None"
+    header = "=" * 55 + "\n"
+    header += f"{'DEEP DIVE INTELLIGENCE REPORT':^55}\n"
+    header += f"{'UNCLASSIFIED // OSINT':^55}\n"
+    header += "=" * 55 + "\n"
+    header += f"TOPIC: {topic.upper()}\n"
+    header += f"DATE:  {timestamp}\n"
+    header += f"SOURCES QUERIED: {sources_str}\n"
+    header += "-" * 55 + "\n"
+    return header
+
+
+def _format_finding_section(
+    finding: Finding,
+    section_title: str,
+) -> str:
+    """Format a single finding section.
+
+    Args:
+        finding: The Finding object to format
+        section_title: Section header title
+
+    Returns:
+        Formatted finding section string
+    """
+    output = f"\n### {section_title}\n"
+    source_names = [s.source_name.upper() for s in finding.sources]
+    output += f"[Source: {', '.join(source_names)}]\n"
+    output += f"- {finding.content}\n"
+
+    if finding.status == CorroborationStatus.CORROBORATED:
+        output += f"  {finding.corroboration_note}\n"
+
+    return output
+
+
+def _format_corroboration_section(findings: list[Finding]) -> str:
+    """Format the corroboration analysis section.
+
+    Args:
+        findings: List of findings to analyze
+
+    Returns:
+        Formatted corroboration section string
+    """
+    output = "\n" + "-" * 55 + "\n"
+    output += "CORRELATION ANALYSIS\n"
+    output += "-" * 55 + "\n"
+
+    # Corroborated findings
+    corroborated = [f for f in findings if f.status == CorroborationStatus.CORROBORATED]
+    if corroborated:
+        output += "\n### CORROBORATED FINDINGS\n"
+        for finding in corroborated:
+            source_names = [s.source_name.upper() for s in finding.sources]
+            output += f"* [{finding.topic}] - Corroborated by [{', '.join(source_names)}]\n"
+    else:
+        output += "\n### CORROBORATED FINDINGS\n"
+        output += "No findings corroborated by multiple sources.\n"
+
+    return output
+
+
+def _format_conflicts_section(conflicts: list[Conflict]) -> str:
+    """Format the information conflicts section.
+
+    Args:
+        conflicts: List of conflicts to display
+
+    Returns:
+        Formatted conflicts section string
+    """
+    if not conflicts:
+        return "\n### INFORMATION CONFLICTS\nNo conflicts detected between sources.\n"
+
+    output = "\n### INFORMATION CONFLICTS\n"
+    for conflict in conflicts:
+        output += f"! [{conflict.topic}]: {conflict.source_a.source_name.upper()} says "
+        output += f"{conflict.source_a_value}, {conflict.source_b.source_name.upper()} says "
+        output += f"{conflict.source_b_value}\n"
+        if conflict.suggested_authority:
+            output += f"  Suggested authority: {conflict.suggested_authority.upper()} "
+            output += "(higher quality tier)\n"
+
+    return output
+
+
+def _format_unavailable_sources_section(
+    unavailable: list[tuple[str, str]],
+) -> str:
+    """Format the unavailable sources section.
+
+    Args:
+        unavailable: List of (source_name, reason) tuples
+
+    Returns:
+        Formatted unavailable sources section string
+    """
+    if not unavailable:
+        return ""
+
+    output = "\n### SOURCES NOT QUERIED\n"
+    for source_name, reason in unavailable:
+        output += f"- {source_name.upper()}: {reason}\n"
+
+    return output
+
+
+def _format_source_attribution_section(
+    result: AggregatedResult,
+    timestamp: str,
+) -> str:
+    """Format the source attribution section.
+
+    Args:
+        result: The aggregated result
+        timestamp: Current timestamp string
+
+    Returns:
+        Formatted attribution section string
+    """
+    output = "\n" + "-" * 55 + "\n"
+    output += "SOURCE ATTRIBUTION\n"
+    output += "-" * 55 + "\n"
+
+    for attribution in result.source_attributions:
+        retrieved = attribution.retrieved_at.strftime("%Y-%m-%d %H:%M UTC")
+        output += f"{attribution.source_name.upper():15} Retrieved: {retrieved}\n"
+
+    if result.sources_failed:
+        output += "\nFailed sources: " + ", ".join(s.upper() for s in result.sources_failed)
+        output += "\n"
+
+    return output
+
+
+def _format_deep_dive_footer(confidence_level: str) -> str:
+    """Format the footer section with overall confidence.
+
+    Args:
+        confidence_level: The confidence level name
+
+    Returns:
+        Formatted footer string
+    """
+    label = CONFIDENCE_LABELS.get(confidence_level, confidence_level)
+    footer = "\n" + "=" * 55 + "\n"
+    footer += f"Overall Confidence: {label}\n"
+    footer += "=" * 55 + "\n"
+    return footer
+
+
+def _format_deep_dive_output(
+    topic: str,
+    result: AggregatedResult,
+    unavailable_sources: list[tuple[str, str]],
+    focus: str | None,
+) -> str:
+    """Format the complete deep dive output.
+
+    Args:
+        topic: The topic being analyzed
+        result: The aggregated result from Correlator
+        unavailable_sources: List of (source_name, reason) tuples
+        focus: Optional focus area
+
+    Returns:
+        Complete formatted deep dive report
+    """
+    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+    # Header
+    output = _format_deep_dive_header(topic, result.sources_queried, timestamp)
+
+    # Group findings by topic/source for organized output
+    findings_by_source: dict[str, list[Finding]] = {}
+    for finding in result.findings:
+        # Use the first source name as key for grouping
+        if finding.sources:
+            key = finding.sources[0].source_name
+            if key not in findings_by_source:
+                findings_by_source[key] = []
+            findings_by_source[key].append(finding)
+
+    # Source-specific sections with proper titles
+    section_titles = {
+        "gdelt": "NEWS & EVENTS (GDELT)",
+        "worldbank": "ECONOMIC CONTEXT (World Bank)",
+        "acled": "CONFLICT SITUATION (ACLED)",
+        "wikidata": "KEY ENTITIES (Wikidata)",
+        "opensanctions": "SANCTIONS EXPOSURE (OpenSanctions)",
+        "opensky": "AVIATION TRACKING (OpenSky)",
+        "aisstream": "MARITIME TRACKING (AISStream)",
+    }
+
+    # Output findings grouped by source
+    source_order = [
+        "gdelt", "worldbank", "acled", "wikidata",
+        "opensanctions", "opensky", "aisstream",
+    ]
+    for source_name in source_order:
+        if source_name in findings_by_source:
+            section_title = section_titles.get(source_name, source_name.upper())
+            # Emphasize focus area if specified
+            if focus and source_name in FOCUS_SOURCE_BOOST.get(focus.lower(), []):
+                section_title = f"** {section_title} (FOCUS) **"
+            output += f"\n### {section_title}\n"
+            output += f"[Source: {source_name.upper()}]\n"
+            for finding in findings_by_source[source_name]:
+                output += f"- {finding.content}\n"
+                if finding.corroboration_note:
+                    output += f"  {finding.corroboration_note}\n"
+
+    # If no findings, note that
+    if not result.findings:
+        output += "\nNo findings retrieved from available sources.\n"
+
+    # Corroboration analysis
+    output += _format_corroboration_section(result.findings)
+
+    # Conflicts
+    output += _format_conflicts_section(result.conflicts)
+
+    # Unavailable sources
+    output += _format_unavailable_sources_section(unavailable_sources)
+
+    # Source attribution
+    output += _format_source_attribution_section(result, timestamp)
+
+    # Footer with confidence
+    confidence_level = result.to_confidence_level().name
+    output += _format_deep_dive_footer(confidence_level)
+
+    return output
+
+
+@mcp.tool()
+async def deep_dive(topic: str, focus: str | None = None) -> str:
+    """Comprehensive multi-source OSINT analysis.
+
+    Queries all relevant data sources concurrently and correlates results
+    to provide a complete picture of any topic, entity, or situation.
+
+    Args:
+        topic: The subject to analyze (country, person, organization, vessel, event)
+        focus: Optional focus area to emphasize (e.g., "sanctions", "conflict", "economic")
+
+    Returns:
+        Comprehensive intelligence report with:
+        - Findings from all relevant sources
+        - Source attribution for each finding
+        - Corroboration notes where sources agree
+        - Conflict notes where sources disagree
+        - Overall confidence assessment
+
+    Examples:
+        deep_dive("Myanmar")  # Country analysis
+        deep_dive("Roman Abramovich")  # Person analysis
+        deep_dive("Iran", focus="sanctions")  # Focused analysis
+        deep_dive("NS Champion")  # Vessel analysis
+    """
+    # Input validation
+    if not topic or not topic.strip():
+        return (
+            "## Invalid Topic\n\n"
+            "Please provide a topic to analyze.\n\n"
+            "**Examples:**\n"
+            '- deep_dive("Myanmar")\n'
+            '- deep_dive("Roman Abramovich")\n'
+            '- deep_dive("Iran", focus="sanctions")'
+        )
+
+    topic_cleaned = topic.strip()
+    logger.info(f"Deep dive requested for: {topic_cleaned}, focus: {focus}")
+
+    try:
+        # Get relevance engine and analyze the topic
+        relevance_engine = _get_relevance_engine()
+        relevance_result = await relevance_engine.analyze(topic_cleaned)
+
+        # Determine which sources to query based on relevance
+        sources_to_query: list[str] = []
+        unavailable_sources: list[tuple[str, str]] = []
+
+        for source in relevance_result.sources:
+            # Include HIGH or MEDIUM_HIGH relevance sources
+            if source.score in (RelevanceScore.HIGH, RelevanceScore.MEDIUM_HIGH):
+                if source.available:
+                    sources_to_query.append(source.source_name)
+                else:
+                    unavailable_sources.append(
+                        (source.source_name, source.unavailable_reason or "Not configured")
+                    )
+
+        # If focus is specified, boost focus-related sources
+        if focus and focus.lower() in FOCUS_SOURCE_BOOST:
+            focus_sources = FOCUS_SOURCE_BOOST[focus.lower()]
+            for source_name in focus_sources:
+                # Check if source is available
+                source_info = next(
+                    (s for s in relevance_result.sources if s.source_name == source_name),
+                    None
+                )
+                if source_info:
+                    already_unavailable = source_name in [u[0] for u in unavailable_sources]
+                    if source_info.available and source_name not in sources_to_query:
+                        sources_to_query.append(source_name)
+                    elif not source_info.available and not already_unavailable:
+                        unavailable_sources.append(
+                            (source_name, source_info.unavailable_reason or "Not configured")
+                        )
+
+        # If no sources selected, fall back to all available
+        if not sources_to_query:
+            sources_to_query = relevance_result.available_sources
+            logger.debug("No high relevance sources, using all available")
+
+        # Ensure at least some sources
+        if not sources_to_query:
+            return (
+                f"## No Sources Available\n\n"
+                f"No data sources are available to analyze **{topic_cleaned}**.\n\n"
+                f"**Configure credentials for:**\n"
+                + "\n".join(f"- {s[0]}: {s[1]}" for s in unavailable_sources)
+            )
+
+        logger.debug(f"Sources to query: {sources_to_query}")
+
+        # Get correlator and aggregate results
+        correlator = _get_correlator()
+        result = await correlator.aggregate(topic_cleaned, sources_to_query)
+
+        # Format and return output
+        output = _format_deep_dive_output(
+            topic_cleaned,
+            result,
+            unavailable_sources,
+            focus,
+        )
+
+        logger.info(f"Deep dive completed for: {topic_cleaned}")
+        return output
+
+    except AdapterTimeoutError as e:
+        logger.warning(f"Timeout in deep dive for {topic_cleaned}: {e}")
+        return (
+            f"## Deep Dive Timed Out\n\n"
+            f"The analysis for **{topic_cleaned}** timed out.\n\n"
+            f"**Suggestions:**\n"
+            f"- Try narrowing your topic\n"
+            f"- Use a focus area to limit sources\n"
+            f"- Try again in a moment"
+        )
+
+    except AdapterAuthError as e:
+        logger.warning(f"Authentication error in deep dive: {e}")
+        return (
+            "## Authentication Error\n\n"
+            "One or more data sources require authentication.\n\n"
+            "Check your API credentials configuration."
+        )
+
+    except AdapterError as e:
+        logger.error(f"Adapter error in deep dive for {topic_cleaned}: {e}")
+        return (
+            f"## Data Source Error\n\n"
+            f"Error querying data sources for **{topic_cleaned}**.\n\n"
+            f"**What happened:** {e.message}\n\n"
+            f"**Suggestions:**\n"
+            f"- Try again in a few moments\n"
+            f"- Try a different topic or focus area"
+        )
+
+    except Exception as e:
+        logger.exception(f"Unexpected error in deep dive for {topic_cleaned}: {e}")
+        return (
+            f"## Error\n\n"
+            f"An unexpected error occurred while analyzing **{topic_cleaned}**.\n\n"
             f"Please try again later."
         )
 
