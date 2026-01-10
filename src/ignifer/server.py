@@ -2006,6 +2006,125 @@ def _identify_vessel_identifier(identifier: str) -> tuple[str, str]:
     return ("vessel_name", normalized)
 
 
+async def _resolve_vessel_to_mmsi(
+    identifier: str, identifier_type: str
+) -> tuple[str | None, str | None, str | None]:
+    """Resolve vessel name or IMO to MMSI using Wikidata.
+
+    Wikidata contains many vessels with their MMSI (P587) and IMO (P458) numbers.
+
+    Args:
+        identifier: The vessel name or IMO number to look up
+        identifier_type: Either 'vessel_name' or 'imo'
+
+    Returns:
+        Tuple of (mmsi, vessel_label, vessel_description) if found, or (None, None, None)
+    """
+    wikidata = _get_wikidata()
+
+    try:
+        # Search Wikidata for the vessel
+        from ignifer.models import QueryParams
+
+        result = await wikidata.query(QueryParams(query=identifier))
+
+        if result.status != ResultStatus.SUCCESS or not result.results:
+            logger.debug(f"Wikidata search for vessel '{identifier}' returned no results")
+            return None, None, None
+
+        # Check each result for MMSI property
+        for search_result in result.results:
+            qid = search_result.get("qid")
+            if not qid:
+                continue
+
+            # Fetch full entity to get claims (including MMSI)
+            entity_result = await wikidata.lookup_by_qid(qid)
+
+            if entity_result.status != ResultStatus.SUCCESS or not entity_result.results:
+                continue
+
+            entity_data = entity_result.results[0]
+
+            # Check for MMSI (stored in entity data if present)
+            # We need to look at the raw claims - let's check if it's a ship
+            # by looking for MMSI in the entity properties
+            # The Wikidata adapter extracts key properties, but MMSI (P587) isn't
+            # in the default list, so we need to fetch it directly
+
+            # For now, let's do a direct API call to get P587 (MMSI)
+            mmsi = await _get_wikidata_property(qid, "P587")
+
+            if mmsi:
+                label = entity_data.get("label", identifier)
+                description = entity_data.get("description", "")
+                logger.info(f"Resolved vessel '{identifier}' to MMSI {mmsi} via Wikidata ({qid})")
+                return mmsi, label, description
+
+        logger.debug(f"No MMSI found in Wikidata for vessel '{identifier}'")
+        return None, None, None
+
+    except Exception as e:
+        logger.warning(f"Error resolving vessel '{identifier}' via Wikidata: {e}")
+        return None, None, None
+
+
+async def _get_wikidata_property(qid: str, property_id: str) -> str | None:
+    """Fetch a specific property value from a Wikidata entity.
+
+    Args:
+        qid: Wikidata Q-ID (e.g., 'Q117072551')
+        property_id: Wikidata property ID (e.g., 'P587' for MMSI)
+
+    Returns:
+        Property value as string, or None if not found
+    """
+    import httpx
+
+    try:
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(10.0),
+            headers={
+                "User-Agent": "Ignifer/1.0 (https://github.com/ignifer/ignifer; ignifer@example.com)"
+            },
+        ) as client:
+            response = await client.get(
+                "https://www.wikidata.org/w/api.php",
+                params={
+                    "action": "wbgetclaims",
+                    "entity": qid,
+                    "property": property_id,
+                    "format": "json",
+                },
+            )
+
+            if response.status_code != 200:
+                return None
+
+            data = response.json()
+            claims = data.get("claims", {})
+
+            if property_id not in claims:
+                return None
+
+            # Get the first claim's value
+            claim_list = claims[property_id]
+            if not claim_list:
+                return None
+
+            mainsnak = claim_list[0].get("mainsnak", {})
+            datavalue = mainsnak.get("datavalue", {})
+
+            if datavalue.get("type") == "string":
+                return datavalue.get("value")
+
+            return None
+
+    except Exception as e:
+        logger.debug(f"Error fetching Wikidata property {property_id} for {qid}: {e}")
+        return None
+
+
 def _get_vessel_type_name(vessel_type: int | None) -> str:
     """Get human-readable vessel type from AIS type code.
 
@@ -2454,34 +2573,78 @@ async def track_vessel(
                 )
 
         elif identifier_type == "imo":
-            # IMO lookup - need to search since AISStream filters by MMSI
-            # For now, return a helpful message about IMO lookup limitations
-            return (
-                f"## IMO Lookup\n\n"
-                f"IMO number **{normalized}** requires vessel database lookup.\n\n"
-                f"**Current limitation:** AISStream filters by MMSI, not IMO.\n"
-                f"IMO to MMSI resolution requires an additional vessel database.\n\n"
-                f"**Suggestions:**\n"
-                f"- Search for the vessel name instead\n"
-                f"- Use the vessel's MMSI if known (9 digits)\n"
-                f"- Look up MMSI from IMO at: https://www.marinetraffic.com\n"
+            # IMO lookup - try to resolve via Wikidata first
+            mmsi, vessel_label, vessel_desc = await _resolve_vessel_to_mmsi(
+                f"IMO {normalized}", identifier_type
             )
 
+            if mmsi:
+                logger.info(f"Resolved IMO {normalized} to MMSI {mmsi} via Wikidata")
+                result = await aisstream.get_vessel_position(mmsi)
+
+                if result.status == ResultStatus.SUCCESS and result.results:
+                    position_data = result.results[0]
+                    # Add resolved vessel info to position data
+                    if vessel_label:
+                        position_data["resolved_name"] = vessel_label
+                    if vessel_desc:
+                        position_data["resolved_description"] = vessel_desc
+                elif result.status == ResultStatus.NO_DATA:
+                    return _format_vessel_output(
+                        vessel_label or f"IMO {normalized}",
+                        None,
+                        retrieved_at,
+                        effective_rigor,
+                    )
+            else:
+                # Wikidata doesn't have this IMO - return helpful message
+                return (
+                    f"## IMO Lookup\n\n"
+                    f"IMO number **{normalized}** could not be resolved to MMSI.\n\n"
+                    f"The vessel was not found in Wikidata's vessel database.\n\n"
+                    f"**Suggestions:**\n"
+                    f"- Try searching by vessel name instead\n"
+                    f"- Use the vessel's MMSI if known (9 digits)\n"
+                    f"- Look up MMSI from IMO at: https://www.marinetraffic.com\n"
+                )
+
         elif identifier_type == "vessel_name":
-            # Vessel name search - AISStream doesn't support name search directly
-            # We would need a separate vessel database or search API
-            return (
-                f"## Vessel Name Search\n\n"
-                f'Searching for vessel **"{normalized}"**.\n\n'
-                f"**Current limitation:** AISStream requires MMSI for queries.\n"
-                f"Vessel name to MMSI resolution requires an additional database.\n\n"
-                f"**Suggestions:**\n"
-                f"- Use the vessel's MMSI if known (9 digits)\n"
-                f"- Use the vessel's IMO number (IMO + 7 digits)\n"
-                f"- Look up MMSI from vessel name at:\n"
-                f"  - https://www.marinetraffic.com\n"
-                f"  - https://www.vesselfinder.com\n"
+            # Vessel name search - try to resolve via Wikidata
+            mmsi, vessel_label, vessel_desc = await _resolve_vessel_to_mmsi(
+                normalized, identifier_type
             )
+
+            if mmsi:
+                logger.info(f"Resolved vessel '{normalized}' to MMSI {mmsi} via Wikidata")
+                result = await aisstream.get_vessel_position(mmsi)
+
+                if result.status == ResultStatus.SUCCESS and result.results:
+                    position_data = result.results[0]
+                    # Add resolved vessel info to position data
+                    if vessel_label:
+                        position_data["resolved_name"] = vessel_label
+                    if vessel_desc:
+                        position_data["resolved_description"] = vessel_desc
+                elif result.status == ResultStatus.NO_DATA:
+                    return _format_vessel_output(
+                        vessel_label or normalized,
+                        None,
+                        retrieved_at,
+                        effective_rigor,
+                    )
+            else:
+                # Wikidata doesn't have this vessel - return helpful message
+                return (
+                    f"## Vessel Name Search\n\n"
+                    f'Vessel **"{normalized}"** could not be resolved to MMSI.\n\n'
+                    f"The vessel was not found in Wikidata's vessel database.\n\n"
+                    f"**Suggestions:**\n"
+                    f"- Use the vessel's MMSI if known (9 digits)\n"
+                    f"- Use the vessel's IMO number (IMO + 7 digits)\n"
+                    f"- Look up MMSI from vessel name at:\n"
+                    f"  - https://www.marinetraffic.com\n"
+                    f"  - https://www.vesselfinder.com\n"
+                )
 
         # Format output
         return _format_vessel_output(identifier, position_data, retrieved_at, effective_rigor)

@@ -553,30 +553,38 @@ class TestTrackVesselTool:
 
     @pytest.mark.asyncio
     async def test_track_by_imo_returns_limitation_message(self) -> None:
-        """IMO lookup returns helpful limitation message."""
-        with patch("ignifer.server._get_aisstream") as mock_get:
+        """IMO lookup returns helpful message when Wikidata resolution fails."""
+        with (
+            patch("ignifer.server._get_aisstream") as mock_get,
+            patch("ignifer.server._resolve_vessel_to_mmsi") as mock_resolve,
+        ):
             adapter = AsyncMock()
             mock_get.return_value = adapter
+            mock_resolve.return_value = (None, None, None)
 
             result = await track_vessel.fn("IMO 9811000")
 
             assert "IMO Lookup" in result
             assert "9811000" in result
-            assert "MMSI" in result
+            assert "could not be resolved to MMSI" in result
             assert "marinetraffic.com" in result
 
     @pytest.mark.asyncio
     async def test_track_by_vessel_name_returns_limitation_message(self) -> None:
-        """Vessel name search returns helpful limitation message."""
-        with patch("ignifer.server._get_aisstream") as mock_get:
+        """Vessel name search returns helpful message when Wikidata resolution fails."""
+        with (
+            patch("ignifer.server._get_aisstream") as mock_get,
+            patch("ignifer.server._resolve_vessel_to_mmsi") as mock_resolve,
+        ):
             adapter = AsyncMock()
             mock_get.return_value = adapter
+            mock_resolve.return_value = (None, None, None)
 
             result = await track_vessel.fn("Ever Given")
 
             assert "Vessel Name Search" in result
             assert "Ever Given" in result
-            assert "MMSI" in result
+            assert "could not be resolved to MMSI" in result
             assert "marinetraffic.com" in result or "vesselfinder.com" in result
 
     @pytest.mark.asyncio

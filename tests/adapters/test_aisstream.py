@@ -258,10 +258,8 @@ class TestAISStreamAdapter:
         def mock_connect(*args: Any, **kwargs: Any) -> MockWebSocket:
             nonlocal call_count
             call_count += 1
-            if call_count < 3:
-                # Return a MockWebSocket that raises on enter
-                return MockWebSocket(error_on_connect=WebSocketException("Connection failed"))
-            return MockWebSocket()
+            # All attempts fail to trigger retry behavior
+            return MockWebSocket(error_on_connect=WebSocketException("Connection failed"))
 
         with patch(
             "ignifer.adapters.aisstream.websockets.connect",
@@ -269,12 +267,12 @@ class TestAISStreamAdapter:
         ):
             adapter = AISStreamAdapter()
 
-            # Should fail after 3 retries with no data
+            # Should fail after MAX_RETRIES (2) attempts
             with pytest.raises(AdapterTimeoutError):
                 await adapter.get_vessel_position("123456789")
 
-            # Verify retries happened
-            assert call_count == 3
+            # Verify retries happened (MAX_RETRIES = 2)
+            assert call_count == 2
 
             await adapter.close()
 
@@ -310,12 +308,13 @@ class TestAISStreamAdapter:
             await adapter.close()
 
     @pytest.mark.asyncio
-    async def test_timeout_raises_timeout_error(
+    async def test_slow_data_returns_no_data(
         self, mock_aisstream_credentials
     ) -> None:
-        """Test timeout raises AdapterTimeoutError."""
-        # Create mock that has very slow recv (simulating timeout)
-        mock_ws = MockWebSocket(messages=[], recv_timeout=True)
+        """Test that slow data reception returns NO_DATA (not timeout error)."""
+        # Create mock that has very slow recv - simulates vessel not broadcasting
+        # With DATA_TIMEOUT exceeded, should return empty positions (NO_DATA)
+        mock_ws = MockWebSocket(messages=[], recv_raises_timeout_when_empty=True)
 
         with patch(
             "ignifer.adapters.aisstream.websockets.connect",
@@ -325,10 +324,11 @@ class TestAISStreamAdapter:
             # Override timeout for faster test
             adapter.DEFAULT_TIMEOUT = 0.1
 
-            with pytest.raises(AdapterTimeoutError) as exc_info:
-                await adapter.get_vessel_position("123456789")
+            result = await adapter.get_vessel_position("123456789")
 
-            assert exc_info.value.source_name == "aisstream"
+            # Should return NO_DATA, not raise timeout error
+            assert result.status == ResultStatus.NO_DATA
+            assert result.results == []
 
             await adapter.close()
 

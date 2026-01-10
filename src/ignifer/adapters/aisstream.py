@@ -72,10 +72,11 @@ class AISStreamAdapter:
     """
 
     WEBSOCKET_URL = "wss://stream.aisstream.io/v0/stream"
-    DEFAULT_TIMEOUT = 30.0  # seconds to wait for vessel data
-    MAX_RETRIES = 3
+    DEFAULT_TIMEOUT = 30.0  # seconds to wait for vessel data (AIS broadcasts every 2-180s)
+    CONNECTION_TIMEOUT = 10.0  # seconds to establish WebSocket connection
+    MAX_RETRIES = 2
     INITIAL_BACKOFF = 1.0  # seconds
-    MAX_BACKOFF = 10.0  # seconds
+    MAX_BACKOFF = 5.0  # seconds
 
     def __init__(self, cache: CacheManager | None = None) -> None:
         """Initialize the AISStream adapter.
@@ -202,49 +203,51 @@ class AISStreamAdapter:
 
         for attempt in range(self.MAX_RETRIES):
             try:
-                async with async_timeout(timeout):
-                    async with websockets.connect(
-                        self.WEBSOCKET_URL,
-                        ping_interval=20,
-                        ping_timeout=10,
-                        close_timeout=5,
-                    ) as ws:
-                        # Send subscription message
-                        await ws.send(json.dumps(subscribe_msg))
-                        logger.debug("Sent subscription to AISStream")
+                # websockets.connect has its own open_timeout (default 10s)
+                # We set it explicitly to CONNECTION_TIMEOUT for clarity
+                async with websockets.connect(
+                    self.WEBSOCKET_URL,
+                    open_timeout=self.CONNECTION_TIMEOUT,
+                    ping_interval=20,
+                    ping_timeout=10,
+                    close_timeout=5,
+                ) as ws:
+                    # Send subscription message
+                    await ws.send(json.dumps(subscribe_msg))
+                    logger.debug("Sent subscription to AISStream")
 
-                        # Receive messages until timeout or we get data
-                        start_time = asyncio.get_event_loop().time()
-                        while (asyncio.get_event_loop().time() - start_time) < timeout:
-                            try:
-                                raw = await asyncio.wait_for(ws.recv(), timeout=5.0)
-                                msg = json.loads(raw)
+                    # Receive messages until data timeout or we get data
+                    start_time = asyncio.get_event_loop().time()
+                    while (asyncio.get_event_loop().time() - start_time) < timeout:
+                        try:
+                            raw = await asyncio.wait_for(ws.recv(), timeout=5.0)
+                            msg = json.loads(raw)
 
-                                # Check for error messages
-                                if msg.get("MessageType") == "Error":
-                                    error_msg = msg.get("Message", "Unknown error")
-                                    if "API" in str(error_msg) or "auth" in str(error_msg).lower():
-                                        raise AdapterAuthError(
-                                            self.source_name, f"AISStream: {error_msg}"
-                                        )
-                                    raise AdapterParseError(
-                                        self.source_name, f"AISStream error: {error_msg}"
+                            # Check for error messages
+                            if msg.get("MessageType") == "Error":
+                                error_msg = msg.get("Message", "Unknown error")
+                                if "API" in str(error_msg) or "auth" in str(error_msg).lower():
+                                    raise AdapterAuthError(
+                                        self.source_name, f"AISStream: {error_msg}"
                                     )
+                                raise AdapterParseError(
+                                    self.source_name, f"AISStream error: {error_msg}"
+                                )
 
-                                # Parse position report
-                                position = self._parse_position_message(msg)
-                                if position:
-                                    positions.append(position)
-                                    # For single MMSI query, return after first position
-                                    if subscribe_msg.get("FiltersShipMMSI"):
-                                        return positions
+                            # Parse position report
+                            position = self._parse_position_message(msg)
+                            if position:
+                                positions.append(position)
+                                # For single MMSI query, return after first position
+                                if subscribe_msg.get("FiltersShipMMSI"):
+                                    return positions
 
-                            except asyncio.TimeoutError:
-                                # No message received in 5s, continue waiting
-                                continue
+                        except asyncio.TimeoutError:
+                            # No message received in 5s, continue waiting
+                            continue
 
-                        # Timeout reached, return what we have
-                        return positions
+                    # Data timeout reached, return what we have (may be empty)
+                    return positions
 
             except InvalidStatus as e:
                 # InvalidStatus has a response attribute with status code
@@ -277,12 +280,12 @@ class AISStreamAdapter:
                     raise AdapterTimeoutError(self.source_name, timeout) from e
 
             except TimeoutError:
-                logger.warning(f"AISStream timeout (attempt {attempt + 1})")
+                logger.warning(f"AISStream connection timeout (attempt {attempt + 1})")
                 if attempt < self.MAX_RETRIES - 1:
                     await asyncio.sleep(backoff)
                     backoff = min(backoff * 2, self.MAX_BACKOFF)
                 else:
-                    raise AdapterTimeoutError(self.source_name, timeout)
+                    raise AdapterTimeoutError(self.source_name, self.CONNECTION_TIMEOUT)
 
             except json.JSONDecodeError as e:
                 raise AdapterParseError(
