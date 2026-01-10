@@ -8,7 +8,7 @@ import httpx
 import pytest
 
 from ignifer.adapters.base import AdapterTimeoutError
-from ignifer.adapters.gdelt import GDELTAdapter
+from ignifer.adapters.gdelt import GDELTAdapter, _sanitize_gdelt_query
 from ignifer.models import QualityTier, QueryParams, ResultStatus
 
 
@@ -188,3 +188,30 @@ class TestGDELTAdapter:
         assert "query=Ukraine" in str(request.url)
 
         await adapter.close()
+
+
+class TestSanitizeGdeltQuery:
+    """Tests for _sanitize_gdelt_query function."""
+
+    def test_quotes_hyphenated_words(self) -> None:
+        """Hyphenated words are quoted for GDELT API."""
+        assert _sanitize_gdelt_query("Japan-China tensions") == '"Japan-China" tensions'
+        assert _sanitize_gdelt_query("F-16 fighter jets") == '"F-16" fighter jets'
+
+    def test_leaves_normal_words_unchanged(self) -> None:
+        """Non-hyphenated queries pass through unchanged."""
+        assert _sanitize_gdelt_query("Ukraine conflict") == "Ukraine conflict"
+        assert _sanitize_gdelt_query("Taiwan semiconductors") == "Taiwan semiconductors"
+
+    def test_handles_multiple_hyphenated_words(self) -> None:
+        """Multiple hyphenated words are all quoted."""
+        result = _sanitize_gdelt_query("Japan-China US-Russia tensions")
+        assert result == '"Japan-China" "US-Russia" tensions'
+
+    def test_handles_complex_hyphenated_words(self) -> None:
+        """Complex multi-hyphen words are quoted."""
+        assert _sanitize_gdelt_query("step-by-step guide") == '"step-by-step" guide'
+
+    def test_empty_string(self) -> None:
+        """Empty string returns empty string."""
+        assert _sanitize_gdelt_query("") == ""

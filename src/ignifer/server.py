@@ -41,6 +41,13 @@ from ignifer.confidence import (
 from ignifer.config import configure_logging, get_settings
 from ignifer.models import QualityTier, QueryParams, ResultStatus, SourceMetadata
 from ignifer.output import OutputFormatter
+from ignifer.source_metadata import (
+    InvalidReliabilityGradeError,
+    SourceMetadataManager,
+    SourceMetadataNotFoundError,
+    detect_region,
+    normalize_domain,
+)
 from ignifer.rigor import (
     format_analytical_caveats,
     format_bibliography,
@@ -70,6 +77,7 @@ _entity_resolver: EntityResolver | None = None
 _formatter: OutputFormatter | None = None
 _relevance_engine: SourceRelevanceEngine | None = None
 _correlator: Correlator | None = None
+_source_metadata: SourceMetadataManager | None = None
 
 
 def _get_cache() -> CacheManager:
@@ -155,10 +163,17 @@ def _get_correlator() -> Correlator:
     return _correlator
 
 
+def _get_source_metadata() -> SourceMetadataManager:
+    global _source_metadata
+    if _source_metadata is None:
+        _source_metadata = SourceMetadataManager()
+    return _source_metadata
+
+
 async def _cleanup_resources() -> None:
     """Close all open resources (adapters, cache connections)."""
     global _adapter, _worldbank, _wikidata, _opensky, _aisstream
-    global _entity_resolver, _cache
+    global _entity_resolver, _cache, _source_metadata
     global _relevance_engine, _correlator
 
     # Clear aggregation components first (they reference adapters)
@@ -178,6 +193,11 @@ async def _cleanup_resources() -> None:
         if adapter is not None:
             await adapter.close()
             globals()[name] = None
+
+    # Close source metadata manager
+    if _source_metadata is not None:
+        await _source_metadata.close()
+        _source_metadata = None
 
     if _cache is not None:
         await _cache.close()
@@ -401,9 +421,50 @@ async def briefing(
         params = QueryParams(query=topic, time_range=time_range)
         result = await adapter.query(params)
 
-        # Format the result with time_range
+        # Pre-fetch source metadata for all domains
+        from ignifer.models import SourceMetadataEntry
+
+        source_metadata_map: dict[str, SourceMetadataEntry] = {}
+        detected_region: str | None = None
+
+        if result.results:
+            # Detect region from query and results
+            detected_region = detect_region(topic, result.results)
+
+            # Get source metadata manager
+            manager = _get_source_metadata()
+
+            # Extract unique domains and fetch/enrich metadata
+            domains = {
+                article.get("domain")
+                for article in result.results
+                if article.get("domain")
+            }
+            for domain in domains:
+                if domain:
+                    try:
+                        normalized = normalize_domain(domain)
+                        entry = await manager.get(normalized)
+                        if entry is None:
+                            # Find an article with this domain for enrichment
+                            article = next(
+                                (a for a in result.results if a.get("domain") == domain),
+                                {},
+                            )
+                            entry = await manager.enrich_from_gdelt(normalized, article)
+                        source_metadata_map[normalized] = entry
+                    except Exception as e:
+                        logger.debug(f"Failed to get metadata for {domain}: {e}")
+
+        # Format the result with time_range and source metadata
         formatter = _get_formatter()
-        output = formatter.format(result, time_range=time_range)
+        output = formatter.format(
+            result,
+            time_range=time_range,
+            source_metadata=source_metadata_map if source_metadata_map else None,
+            detected_region=detected_region,
+            query=topic,
+        )
 
         # Auto-extract top articles if we have results
         if result.results:
@@ -569,6 +630,190 @@ async def extract_article(url: str) -> str:
     except Exception as e:
         logger.exception(f"Error extracting article from {url}: {e}")
         return f"Error extracting article: {e}"
+
+
+@mcp.tool()
+async def set_source_reliability(domain: str, reliability: str) -> str:
+    """Set the reliability grade for a news source domain.
+
+    Use this tool to override the auto-assigned reliability grade for a source.
+    Grades follow IC standard (A=Completely reliable through F=Cannot be judged).
+
+    Args:
+        domain: The news source domain (e.g., 'reuters.com', 'scmp.com')
+        reliability: Reliability grade A-F:
+            A = Completely reliable
+            B = Usually reliable
+            C = Fairly reliable
+            D = Not usually reliable
+            E = Unreliable
+            F = Reliability cannot be judged
+
+    Returns:
+        Confirmation message with updated reliability grade.
+    """
+    try:
+        normalized = normalize_domain(domain)
+        manager = _get_source_metadata()
+        await manager.set_reliability(normalized, reliability)
+        return f"Updated reliability for '{normalized}' to {reliability.upper()}."
+    except InvalidReliabilityGradeError as e:
+        return str(e)
+    except SourceMetadataNotFoundError:
+        return (
+            f"No metadata found for '{domain}'. "
+            "Run a briefing containing this source to auto-enrich, or manually set values."
+        )
+    except Exception as e:
+        logger.exception(f"Error setting reliability for {domain}: {e}")
+        return f"Error setting reliability: {e}"
+
+
+@mcp.tool()
+async def set_source_orientation(
+    domain: str, orientation: str, axis: str | None = None
+) -> str:
+    """Set the political orientation for a news source domain.
+
+    Use this tool to record the political leaning or bias of a source.
+    Orientations are region-specific (e.g., pro-China/pro-independence for Taiwan).
+
+    Args:
+        domain: The news source domain (e.g., 'focustaiwan.tw')
+        orientation: Political orientation description (e.g., 'Pro-independence', 'Center-right')
+        axis: Optional orientation axis for context (e.g., 'china-independence', 'left-right')
+
+    Returns:
+        Confirmation message with updated orientation.
+    """
+    try:
+        normalized = normalize_domain(domain)
+        manager = _get_source_metadata()
+        await manager.set_orientation(normalized, orientation, axis)
+        axis_note = f" (axis: {axis})" if axis else ""
+        return f"Updated orientation for '{normalized}' to '{orientation}'{axis_note}."
+    except SourceMetadataNotFoundError:
+        return (
+            f"No metadata found for '{domain}'. "
+            "Run a briefing containing this source to auto-enrich, or manually set values."
+        )
+    except Exception as e:
+        logger.exception(f"Error setting orientation for {domain}: {e}")
+        return f"Error setting orientation: {e}"
+
+
+@mcp.tool()
+async def set_source_nation(domain: str, nation: str) -> str:
+    """Set the nation of origin for a news source domain.
+
+    Use this tool to correct the auto-detected nation for a source.
+
+    Args:
+        domain: The news source domain (e.g., 'scmp.com')
+        nation: Nation of origin (e.g., 'Hong Kong', 'Taiwan', 'United States')
+
+    Returns:
+        Confirmation message with updated nation.
+    """
+    try:
+        normalized = normalize_domain(domain)
+        manager = _get_source_metadata()
+        await manager.set_nation(normalized, nation)
+        return f"Updated nation for '{normalized}' to '{nation}'."
+    except SourceMetadataNotFoundError:
+        return (
+            f"No metadata found for '{domain}'. "
+            "Run a briefing containing this source to auto-enrich, or manually set values."
+        )
+    except Exception as e:
+        logger.exception(f"Error setting nation for {domain}: {e}")
+        return f"Error setting nation: {e}"
+
+
+@mcp.tool()
+async def get_source_metadata(domain: str) -> str:
+    """Get stored metadata for a news source domain.
+
+    Use this tool to inspect the reliability, orientation, and other
+    metadata stored for a source.
+
+    Args:
+        domain: The news source domain (e.g., 'reuters.com')
+
+    Returns:
+        Formatted metadata including nation, language, reliability, and orientation.
+    """
+    try:
+        normalized = normalize_domain(domain)
+        manager = _get_source_metadata()
+        entry = await manager.get(normalized)
+
+        if entry is None:
+            return (
+                f"No metadata found for '{normalized}'. "
+                "Run a briefing containing this source to auto-enrich, or manually set values."
+            )
+
+        lines = [f"**Source Metadata: {normalized}**", ""]
+        lines.append(f"  Nation: {entry.nation or 'Unknown'}")
+        lines.append(f"  Language: {entry.language or 'Unknown'}")
+        lines.append(f"  Reliability: {entry.reliability} ({_reliability_description(entry.reliability)})")
+        if entry.political_orientation:
+            axis_note = f" ({entry.orientation_axis})" if entry.orientation_axis else ""
+            lines.append(f"  Orientation: {entry.political_orientation}{axis_note}")
+        lines.append(f"  Enrichment Source: {entry.enrichment_source}")
+        if entry.original_reliability:
+            lines.append(f"  Original Reliability: {entry.original_reliability}")
+
+        return "\n".join(lines)
+    except Exception as e:
+        logger.exception(f"Error getting metadata for {domain}: {e}")
+        return f"Error getting metadata: {e}"
+
+
+@mcp.tool()
+async def reset_source_metadata(domain: str) -> str:
+    """Reset source metadata to original auto-enriched values.
+
+    Use this tool to undo user overrides and restore the original
+    auto-enriched reliability and orientation values.
+
+    Args:
+        domain: The news source domain to reset
+
+    Returns:
+        Confirmation message or error if no original values exist.
+    """
+    try:
+        normalized = normalize_domain(domain)
+        manager = _get_source_metadata()
+        was_reset = await manager.reset(normalized)
+
+        if was_reset:
+            return f"Reset metadata for '{normalized}' to original auto-enriched values."
+        else:
+            return (
+                f"No original values to restore for '{normalized}'. "
+                "This source was manually added, not auto-enriched."
+            )
+    except SourceMetadataNotFoundError:
+        return f"No metadata found for '{domain}'."
+    except Exception as e:
+        logger.exception(f"Error resetting metadata for {domain}: {e}")
+        return f"Error resetting metadata: {e}"
+
+
+def _reliability_description(grade: str) -> str:
+    """Get human-readable description for reliability grade."""
+    descriptions = {
+        "A": "Completely reliable",
+        "B": "Usually reliable",
+        "C": "Fairly reliable",
+        "D": "Not usually reliable",
+        "E": "Unreliable",
+        "F": "Reliability cannot be judged",
+    }
+    return descriptions.get(grade.upper(), "Unknown")
 
 
 async def _get_economic_events(country: str, days: int = 7) -> list[dict[str, Any]]:

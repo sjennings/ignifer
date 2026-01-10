@@ -24,6 +24,34 @@ from ignifer.timeparse import parse_time_range
 logger = logging.getLogger(__name__)
 
 
+def _sanitize_gdelt_query(query: str) -> str:
+    """Sanitize query for GDELT API.
+
+    GDELT treats hyphens as operators. Words containing hyphens must be quoted.
+    For example: Japan-China -> "Japan-China"
+
+    Args:
+        query: Raw user query
+
+    Returns:
+        Sanitized query safe for GDELT API
+    """
+    import re
+
+    # Find words containing hyphens that aren't already quoted
+    # Match word-word patterns not inside quotes
+    def quote_hyphenated(match: re.Match) -> str:
+        word = match.group(0)
+        # Don't re-quote if already quoted
+        return f'"{word}"'
+
+    # Pattern: word-word (hyphenated terms not already in quotes)
+    # This regex finds hyphenated words
+    sanitized = re.sub(r'\b\w+(?:-\w+)+\b', quote_hyphenated, query)
+
+    return sanitized
+
+
 class GDELTAdapter:
     """GDELT adapter for news and event data.
 
@@ -36,7 +64,7 @@ class GDELTAdapter:
     """
 
     BASE_URL = "https://api.gdeltproject.org/api/v2/doc/doc"
-    DEFAULT_TIMEOUT = 10.0  # seconds
+    DEFAULT_TIMEOUT = 30.0  # seconds (GDELT can be slow during high load)
     MAX_RETRIES = 3
     RETRY_BASE_DELAY = 2.0  # seconds
 
@@ -111,8 +139,9 @@ class GDELTAdapter:
         # Build request URL
         # TIMESPAN limits to recent articles; GDELT defaults to 3 months by relevance
         # "sort:datedesc" sorts newest first within the timespan
+        sanitized_query = _sanitize_gdelt_query(params.query)
         query_params = {
-            "query": params.query,
+            "query": sanitized_query,
             "mode": "ArtList",
             "format": "json",
             "maxrecords": 75,

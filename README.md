@@ -49,6 +49,15 @@ Comprehensive analysis correlating all available sources:
 - Conflict identification when sources disagree
 - Source attribution for every finding
 
+### Source Quality Intelligence
+Persistent metadata tracking for news source quality assessment:
+- Automatic enrichment from GDELT data on first encounter
+- IC-style reliability grades (A-F) for each source domain
+- Political orientation tracking with region-specific axes
+- Source ranking prioritizing regional and high-reliability sources
+- User override capability with rollback to original values
+- Multi-region detection for global topics
+
 ### Rigor Mode (IC-Standard Output)
 Toggle enhanced analytical output for professional analysts:
 - ICD 203 confidence levels (REMOTE to ALMOST_CERTAIN)
@@ -70,7 +79,7 @@ Toggle enhanced analytical output for professional analysts:
 
 ## MCP Tools
 
-Ignifer exposes seven tools to Claude Desktop:
+Ignifer exposes twelve tools to Claude Desktop:
 
 ### `briefing`
 Generate OSINT intelligence briefings on any topic.
@@ -207,6 +216,97 @@ deep_dive("Myanmar")
 deep_dive("Venezuela", focus="economic")
 deep_dive("Roman Abramovich", rigor=True)  # Full IC-standard analysis
 ```
+
+---
+
+### `set_source_reliability`
+Set the reliability grade for a news source domain.
+
+```
+set_source_reliability(domain: str, reliability: str) -> str
+```
+
+**Parameters:**
+- `domain` - The news source domain (e.g., "reuters.com", "scmp.com")
+- `reliability` - Reliability grade A-F:
+  - A = Completely reliable
+  - B = Usually reliable
+  - C = Fairly reliable
+  - D = Not usually reliable
+  - E = Unreliable
+  - F = Reliability cannot be judged
+
+**Example:**
+```
+set_source_reliability("focustaiwan.tw", "B")
+set_source_reliability("rt.com", "E")
+```
+
+---
+
+### `set_source_orientation`
+Set the political orientation for a news source domain.
+
+```
+set_source_orientation(domain: str, orientation: str, axis: str | None = None) -> str
+```
+
+**Parameters:**
+- `domain` - The news source domain
+- `orientation` - Political orientation description (e.g., "Pro-independence", "Center-right")
+- `axis` - Optional orientation axis for context (e.g., "china-independence", "left-right")
+
+**Example:**
+```
+set_source_orientation("focustaiwan.tw", "Pro-independence", "china-independence")
+set_source_orientation("guardian.co.uk", "Center-left", "left-right")
+```
+
+---
+
+### `set_source_nation`
+Set the nation of origin for a news source domain.
+
+```
+set_source_nation(domain: str, nation: str) -> str
+```
+
+**Parameters:**
+- `domain` - The news source domain
+- `nation` - Nation of origin (e.g., "Hong Kong", "Taiwan", "United States")
+
+**Example:**
+```
+set_source_nation("scmp.com", "Hong Kong")
+```
+
+---
+
+### `get_source_metadata`
+Get stored metadata for a news source domain.
+
+```
+get_source_metadata(domain: str) -> str
+```
+
+**Parameters:**
+- `domain` - The news source domain to inspect
+
+**Returns:** Formatted metadata including nation, language, reliability grade, and political orientation.
+
+---
+
+### `reset_source_metadata`
+Reset source metadata to original auto-enriched values.
+
+```
+reset_source_metadata(domain: str) -> str
+```
+
+**Parameters:**
+- `domain` - The news source domain to reset
+
+**Returns:** Confirmation message or error if no original values exist to restore.
 
 ## Rigor Mode
 
@@ -354,6 +454,7 @@ ignifer/
 ├── config.py              # Configuration management
 ├── models.py              # Pydantic data models
 ├── output.py              # Output formatting
+├── source_metadata.py     # Source quality tracking & management
 └── timeparse.py           # Time range parsing
 ```
 
@@ -432,9 +533,9 @@ uv run pytest tests/adapters/test_gdelt.py -v
 - Phase 1: Zero-Config OSINT (GDELT, World Bank, Wikidata)
 - Phase 2: Transportation Tracking (OpenSky, AISStream)
 - Phase 3: Multi-Source Correlation & Rigor Mode
+- Phase 4: Source Quality Intelligence (reliability tracking, political orientation, regional prioritization)
 
 ### Planned
-- Enhancements to briefing tool (categorization/evaluation of sources, ability to uprank/downrank, gap analysis)
 - Enhancements to economic tool (trade network/resource security)
 - Social media monitoring/trend analysis
 - Infrastructure monitoring (power/internet/telecom outages)
