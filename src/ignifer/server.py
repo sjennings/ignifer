@@ -17,6 +17,7 @@ from ignifer.adapters import (
     WikidataAdapter,
     WorldBankAdapter,
 )
+from ignifer.aggregation import EntityResolver
 from ignifer.cache import CacheManager
 from ignifer.config import configure_logging, get_settings
 from ignifer.models import QueryParams, ResultStatus
@@ -37,6 +38,7 @@ _cache: CacheManager | None = None
 _adapter: GDELTAdapter | None = None
 _worldbank: WorldBankAdapter | None = None
 _wikidata: WikidataAdapter | None = None
+_entity_resolver: EntityResolver | None = None
 _formatter: OutputFormatter | None = None
 
 
@@ -68,6 +70,13 @@ def _get_wikidata() -> WikidataAdapter:
     return _wikidata
 
 
+def _get_entity_resolver() -> EntityResolver:
+    global _entity_resolver
+    if _entity_resolver is None:
+        _entity_resolver = EntityResolver(wikidata_adapter=_get_wikidata())
+    return _entity_resolver
+
+
 def _get_formatter() -> OutputFormatter:
     global _formatter
     if _formatter is None:
@@ -77,7 +86,10 @@ def _get_formatter() -> OutputFormatter:
 
 async def _cleanup_resources() -> None:
     """Close all open resources (adapters, cache connections)."""
-    global _adapter, _worldbank, _wikidata, _cache
+    global _adapter, _worldbank, _wikidata, _entity_resolver, _cache
+
+    # Clear entity resolver first (it references wikidata adapter)
+    _entity_resolver = None
 
     # Close adapters first, then cache (adapters may use cache)
     adapters = [(_adapter, "_adapter"), (_worldbank, "_worldbank"), (_wikidata, "_wikidata")]
@@ -118,7 +130,10 @@ async def _extract_single_article(url: str, language: str = "") -> dict[str, str
     Returns dict with url, language, content, and error fields.
     """
     result: dict[str, str | None] = {
-        "url": url, "language": language, "content": None, "error": None
+        "url": url,
+        "language": language,
+        "content": None,
+        "error": None,
     }
 
     try:
@@ -182,10 +197,9 @@ async def _auto_extract_articles(
         domain = article.get("domain", "")
         url = article.get("url")
         if url and lang not in seen_languages:
-            selected.append({
-                "url": url, "language": lang,
-                "title": article.get("title", ""), "domain": domain
-            })
+            selected.append(
+                {"url": url, "language": lang, "title": article.get("title", ""), "domain": domain}
+            )
             seen_languages.add(lang)
             seen_domains.add(domain)
 
@@ -197,10 +211,9 @@ async def _auto_extract_articles(
         url = article.get("url")
         if url and domain not in seen_domains:
             lang = article.get("language", "english").lower()
-            selected.append({
-                "url": url, "language": lang,
-                "title": article.get("title", ""), "domain": domain
-            })
+            selected.append(
+                {"url": url, "language": lang, "title": article.get("title", ""), "domain": domain}
+            )
             seen_domains.add(domain)
 
     if not selected:
@@ -214,25 +227,29 @@ async def _auto_extract_articles(
     extracted: list[dict[str, str | None]] = []
     for i, res in enumerate(results):
         if isinstance(res, BaseException):
-            extracted.append({
-                "url": selected[i]["url"],
-                "title": selected[i]["title"],
-                "language": selected[i].get("language", ""),
-                "domain": selected[i]["domain"],
-                "content": None,
-                "error": str(res)[:50],
-            })
+            extracted.append(
+                {
+                    "url": selected[i]["url"],
+                    "title": selected[i]["title"],
+                    "language": selected[i].get("language", ""),
+                    "domain": selected[i]["domain"],
+                    "content": None,
+                    "error": str(res)[:50],
+                }
+            )
         else:
             # res is dict[str, str | None] at this point
             res_dict: dict[str, str | None] = res
-            extracted.append({
-                "url": selected[i]["url"],
-                "title": selected[i]["title"],
-                "language": selected[i].get("language", ""),
-                "domain": selected[i]["domain"],
-                "content": res_dict.get("content"),
-                "error": res_dict.get("error"),
-            })
+            extracted.append(
+                {
+                    "url": selected[i]["url"],
+                    "title": selected[i]["title"],
+                    "language": selected[i].get("language", ""),
+                    "domain": selected[i]["domain"],
+                    "content": res_dict.get("content"),
+                    "error": res_dict.get("error"),
+                }
+            )
 
     return extracted
 
@@ -277,13 +294,13 @@ async def briefing(topic: str, time_range: str | None = None) -> str:
                 f"## Invalid Time Range\n\n"
                 f"Could not parse time range: **{time_range}**\n\n"
                 f"**Supported formats:**\n"
-                f"- \"last 24 hours\", \"last 48 hours\"\n"
-                f"- \"last 7 days\", \"last 30 days\"\n"
-                f"- \"this week\", \"last week\"\n"
-                f"- \"2026-01-01 to 2026-01-08\" (ISO date range)\n\n"
+                f'- "last 24 hours", "last 48 hours"\n'
+                f'- "last 7 days", "last 30 days"\n'
+                f'- "this week", "last week"\n'
+                f'- "2026-01-01 to 2026-01-08" (ISO date range)\n\n'
                 f"**Examples:**\n"
-                f"- briefing(\"Syria\", time_range=\"last 48 hours\")\n"
-                f"- briefing(\"Ukraine\", time_range=\"last 7 days\")"
+                f'- briefing("Syria", time_range="last 48 hours")\n'
+                f'- briefing("Ukraine", time_range="last 7 days")'
             )
 
     try:
@@ -309,7 +326,8 @@ async def briefing(topic: str, time_range: str | None = None) -> str:
                 output += "═" * 55 + "\n\n"
 
                 for i, ext in enumerate(extracts, 1):
-                    lang = ext.get("language", "")
+                    lang_val = ext.get("language", "")
+                    lang = str(lang_val) if lang_val else ""
                     is_non_english = lang and lang.lower() != "english"
                     lang_tag = f" [{lang.upper()}]" if is_non_english else ""
                     output += f"### ARTICLE {i}{lang_tag}: {ext['title']}\n"
@@ -465,9 +483,10 @@ async def _get_country_context(country: str) -> dict[str, Any] | None:
         if search_result.status != ResultStatus.SUCCESS or not search_result.results:
             return None
 
-        qid = search_result.results[0].get("qid")
-        if not qid:
+        qid_raw = search_result.results[0].get("qid")
+        if not qid_raw:
             return None
+        qid = str(qid_raw)
 
         # Step 2: Lookup by Q-ID to get full properties
         entity_result = await wikidata.lookup_by_qid(qid)
@@ -622,8 +641,10 @@ async def economic_context(country: str) -> str:
 
     # Build flat list of all indicators for querying
     all_indicator_defs = (
-        CORE_INDICATORS + E1_VULNERABILITY_INDICATORS +
-        E2_TRADE_INDICATORS + E4_FINANCIAL_INDICATORS
+        CORE_INDICATORS
+        + E1_VULNERABILITY_INDICATORS
+        + E2_TRADE_INDICATORS
+        + E4_FINANCIAL_INDICATORS
     )
 
     try:
@@ -642,9 +663,7 @@ async def economic_context(country: str) -> str:
 
             if result.status == ResultStatus.SUCCESS and result.results:
                 sorted_results = sorted(
-                    result.results,
-                    key=lambda x: str(x.get("year", "")),
-                    reverse=True
+                    result.results, key=lambda x: str(x.get("year", "")), reverse=True
                 )
                 if sorted_results:
                     all_results[label] = sorted_results[0]
@@ -788,6 +807,310 @@ async def economic_context(country: str) -> str:
         return (
             f"## Error\n\n"
             f"An unexpected error occurred while retrieving economic data for **{country}**.\n\n"
+            f"Please try again later."
+        )
+
+
+def _format_entity_output(
+    entity_data: dict[str, Any],
+    resolution_tier: str,
+    confidence: float,
+) -> str:
+    """Format entity data for user-friendly output.
+
+    Args:
+        entity_data: Entity information from WikidataAdapter
+        resolution_tier: How the entity was resolved (exact, normalized, etc.)
+        confidence: Confidence score of the resolution (0.0 to 1.0)
+
+    Returns:
+        Formatted string with entity intelligence
+    """
+    # Extract key fields
+    label = entity_data.get("label", "Unknown")
+    qid = entity_data.get("qid", "")
+    description = entity_data.get("description", "")
+    aliases = entity_data.get("aliases", "")
+    url = entity_data.get("url", f"https://www.wikidata.org/wiki/{qid}")
+
+    # Format entity type from instance_of
+    instance_of = entity_data.get("instance_of", "")
+    entity_type = instance_of if instance_of else "Entity"
+
+    # Build output
+    output = "=" * 55 + "\n"
+    output += f"{'ENTITY LOOKUP':^55}\n"
+    output += "=" * 55 + "\n"
+    output += f"ENTITY: {label}\n"
+    if entity_type and entity_type != "Entity":
+        output += f"TYPE: {entity_type}\n"
+    output += f"WIKIDATA: {qid} ({url})\n"
+
+    if description:
+        output += f"\nDESCRIPTION:\n{description}\n"
+
+    # Key facts section
+    key_facts = []
+    if entity_data.get("headquarters"):
+        key_facts.append(("Headquarters", entity_data["headquarters"]))
+    if entity_data.get("inception"):
+        key_facts.append(("Founded", entity_data["inception"]))
+    if entity_data.get("country"):
+        key_facts.append(("Country", entity_data["country"]))
+    if entity_data.get("occupation"):
+        key_facts.append(("Occupation", entity_data["occupation"]))
+    if entity_data.get("citizenship"):
+        key_facts.append(("Citizenship", entity_data["citizenship"]))
+    if entity_data.get("website"):
+        key_facts.append(("Website", entity_data["website"]))
+
+    if key_facts:
+        output += "\nKEY FACTS:\n"
+        for fact_name, fact_value in key_facts:
+            padded_name = f"{fact_name} ".ljust(20, ".")
+            output += f"  {padded_name} {fact_value}\n"
+
+    # Aliases
+    if aliases:
+        output += f"\nALIASES:\n  {aliases}\n"
+
+    # Related entities count
+    related_count = entity_data.get("related_entities_count", 0)
+    if related_count > 0:
+        output += f"\nRELATED ENTITIES: {related_count} linked entities in Wikidata\n"
+
+    # Footer with resolution info
+    output += "\n" + "-" * 55 + "\n"
+    output += f"Resolution: {resolution_tier} (confidence: {confidence:.2f})\n"
+    output += "Source: Wikidata\n"
+    retrieved_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    output += f"Retrieved: {retrieved_at}\n"
+    output += "=" * 55 + "\n"
+
+    return output
+
+
+def _format_disambiguation(
+    results: list[dict[str, Any]],
+    query: str,
+) -> str:
+    """Format multiple entity matches for disambiguation.
+
+    Args:
+        results: List of entity search results
+        query: Original query string
+
+    Returns:
+        Formatted disambiguation message
+    """
+    output = "## Multiple Entities Found\n\n"
+    output += f'Found {len(results)} entities matching "{query}". Please specify:\n\n'
+
+    for i, result in enumerate(results[:5], 1):
+        qid = result.get("qid", "")
+        label = result.get("label", "Unknown")
+        description = result.get("description", "No description")
+        url = result.get("url", f"https://www.wikidata.org/wiki/{qid}")
+
+        output += f"{i}. **{label}** ({qid})\n"
+        output += f"   {description}\n"
+        output += f"   {url}\n\n"
+
+    output += '**Tip:** Use `identifier="Q..."` for precise lookup.\n'
+    output += 'Example: `entity_lookup(identifier="Q90")` for Paris, France.\n'
+
+    return output
+
+
+def _format_resolution_failure(
+    query: str,
+    suggestions: list[str],
+    tiers_attempted: list[str],
+) -> str:
+    """Format a failed resolution message with suggestions.
+
+    Args:
+        query: Original query string
+        suggestions: List of suggestions from EntityResolver
+        tiers_attempted: List of resolution tiers that were tried
+
+    Returns:
+        Formatted error message with suggestions
+    """
+    output = "## Entity Not Found\n\n"
+    output += f'Could not find entity matching "{query}".\n\n'
+
+    output += "**Resolution attempted:**\n"
+    for tier in tiers_attempted:
+        output += f"- {tier.capitalize()} match: no match\n"
+
+    output += "\n**Suggestions:**\n"
+    for suggestion in suggestions:
+        output += f"- {suggestion}\n"
+
+    # Always suggest Q-ID
+    output += '- Try using a Wikidata Q-ID if known (e.g., identifier="Q102673")\n'
+
+    return output
+
+
+@mcp.tool()
+async def entity_lookup(name: str = "", identifier: str = "") -> str:
+    """Look up any entity and get comprehensive intelligence.
+
+    Use this tool to research people, organizations, companies, places, or things.
+    Returns Wikidata-enriched information including entity type, description,
+    key facts, aliases, and cross-reference identifiers.
+
+    Args:
+        name: Entity name to look up (e.g., "Gazprom", "Vladimir Putin", "NATO")
+        identifier: Optional Wikidata Q-ID for direct lookup (e.g., "Q102673")
+            Use this when you know the exact entity Q-ID for precise results.
+
+    Returns:
+        Formatted entity intelligence with source attribution, or
+        disambiguation list if multiple matches found.
+    """
+    logger.info(f"Entity lookup requested: name='{name}', identifier='{identifier}'")
+
+    # Normalize inputs - strip whitespace
+    name = name.strip() if name else ""
+    identifier = identifier.strip() if identifier else ""
+
+    # Validate input - need at least one of name or identifier
+    if not name and not identifier:
+        return (
+            "## Invalid Request\n\n"
+            "Please provide either an entity `name` or `identifier`.\n\n"
+            "**Examples:**\n"
+            '- `entity_lookup(name="Gazprom")`\n'
+            '- `entity_lookup(identifier="Q102673")`'
+        )
+
+    wikidata = _get_wikidata()
+
+    try:
+        # If identifier provided (Q-ID), do direct lookup
+        if identifier:
+            qid = identifier.upper()
+            if not qid.startswith("Q"):
+                qid = f"Q{qid}"
+
+            logger.info(f"Direct Q-ID lookup: {qid}")
+            result = await wikidata.lookup_by_qid(qid)
+
+            if result.status != ResultStatus.SUCCESS or not result.results:
+                error_msg = result.error or f"Entity {qid} not found in Wikidata."
+                return (
+                    f"## Entity Not Found\n\n"
+                    f"{error_msg}\n\n"
+                    f"**Suggestions:**\n"
+                    f"- Check the Q-ID format (should be Q followed by digits)\n"
+                    f'- Try searching by name instead: `entity_lookup(name="...")`\n'
+                    f"- Browse Wikidata directly: https://www.wikidata.org"
+                )
+
+            entity_data = result.results[0]
+            return _format_entity_output(
+                entity_data,
+                resolution_tier="direct Q-ID lookup",
+                confidence=1.0,
+            )
+
+        # Name-based lookup - use EntityResolver first
+        resolver = _get_entity_resolver()
+        resolution = await resolver.resolve(name)
+
+        if not resolution.is_successful():
+            # Resolution failed - return suggestions
+            tiers_attempted = ["exact", "normalized", "wikidata", "fuzzy"]
+            return _format_resolution_failure(
+                query=name,
+                suggestions=resolution.suggestions,
+                tiers_attempted=tiers_attempted,
+            )
+
+        # Resolution succeeded - fetch full entity details
+        resolved_qid = resolution.wikidata_qid
+
+        if resolved_qid:
+            # Fetch full entity details by Q-ID
+            result = await wikidata.lookup_by_qid(resolved_qid)
+
+            if result.status == ResultStatus.SUCCESS and result.results:
+                entity_data = result.results[0]
+                return _format_entity_output(
+                    entity_data,
+                    resolution_tier=resolution.resolution_tier.value,
+                    confidence=resolution.match_confidence,
+                )
+
+        # If we have a resolution but no Q-ID or lookup failed,
+        # try a direct search which may return multiple results
+        params = QueryParams(query=name)
+        search_result = await wikidata.query(params)
+
+        if search_result.status != ResultStatus.SUCCESS or not search_result.results:
+            return _format_resolution_failure(
+                query=name,
+                suggestions=resolution.suggestions
+                or [
+                    "Try checking the spelling",
+                    "Try a more complete name",
+                ],
+                tiers_attempted=["exact", "normalized", "wikidata", "fuzzy"],
+            )
+
+        # Multiple results - show disambiguation
+        if len(search_result.results) > 1:
+            return _format_disambiguation(search_result.results, name)
+
+        # Single result - fetch full details
+        entity_qid_raw = search_result.results[0].get("qid")
+        if entity_qid_raw:
+            entity_qid = str(entity_qid_raw)
+            detail_result = await wikidata.lookup_by_qid(entity_qid)
+            if detail_result.status == ResultStatus.SUCCESS and detail_result.results:
+                return _format_entity_output(
+                    detail_result.results[0],
+                    resolution_tier=resolution.resolution_tier.value,
+                    confidence=resolution.match_confidence,
+                )
+
+        # Fallback to search result
+        return _format_entity_output(
+            search_result.results[0],
+            resolution_tier=resolution.resolution_tier.value,
+            confidence=resolution.match_confidence,
+        )
+
+    except AdapterTimeoutError as e:
+        logger.warning(f"Timeout looking up entity '{name or identifier}': {e}")
+        return (
+            f"## Request Timed Out\n\n"
+            f"The entity lookup for **{name or identifier}** timed out.\n\n"
+            f"**Suggestions:**\n"
+            f"- Try again in a moment\n"
+            f"- Check your network connection\n"
+            f"- Wikidata may be experiencing high load"
+        )
+
+    except AdapterError as e:
+        logger.error(f"Adapter error looking up entity '{name or identifier}': {e}")
+        return (
+            f"## Unable to Retrieve Data\n\n"
+            f"Could not look up entity **{name or identifier}**.\n\n"
+            f"**What happened:** {e.message}\n\n"
+            f"**Suggestions:**\n"
+            f"- Try again in a few moments\n"
+            f"- Try a different spelling or identifier"
+        )
+
+    except Exception as e:
+        logger.exception(f"Unexpected error looking up entity '{name or identifier}': {e}")
+        return (
+            f"## Error\n\n"
+            f"An unexpected error occurred while looking up **{name or identifier}**.\n\n"
             f"Please try again later."
         )
 
