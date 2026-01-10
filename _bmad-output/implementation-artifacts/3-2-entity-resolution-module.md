@@ -1,6 +1,6 @@
 # Story 3.2: Entity Resolution Module
 
-Status: ready-for-dev
+Status: done
 
 ## Story
 
@@ -577,3 +577,76 @@ tests/
     ├── test_worldbank.py
     └── test_wikidata.py
 ```
+
+## Senior Developer Review
+
+**Review Date:** 2026-01-09
+**Reviewer:** Senior Developer (Adversarial Review)
+**Branch:** story/3-2-entity-resolution-module
+
+### Issues Found
+
+#### ISSUE 1 - BLOCKING: Missing Validation for `match_confidence` Field
+- **File:** `src/ignifer/aggregation/entity_resolver.py` (Line 64)
+- **Severity:** BLOCKING
+- **Problem:** The `match_confidence` field accepted any float value, including negative numbers and values > 1.0, violating the documented range of 0.0 to 1.0.
+- **Evidence:**
+  ```python
+  >>> EntityMatch(resolution_tier='exact', match_confidence=1.5, original_query='test').match_confidence
+  1.5  # Should have been rejected!
+  ```
+- **Fix Applied:** Added `Field(ge=0.0, le=1.0)` validation to `match_confidence` field.
+
+#### ISSUE 2 - SHOULD FIX: Missing Test Coverage for Edge Cases
+- **File:** `tests/aggregation/test_entity_resolver.py`
+- **Severity:** SHOULD FIX
+- **Problem:** Lines 289, 305, and 388 were uncovered (98% coverage). Missing tests for:
+  - Empty string and whitespace-only inputs
+  - Wikidata result with no QID field
+  - "Did you mean" suggestions for moderately similar entities
+- **Fix Applied:** Added 5 new tests covering these edge cases. Coverage improved from 98% to 99%.
+
+#### ISSUE 3 - MINOR: Logging Contains User Query Data
+- **File:** `src/ignifer/aggregation/entity_resolver.py` (Lines 145, 181, 186, 320, 352-354)
+- **Severity:** MINOR (noted, not fixed)
+- **Problem:** User queries are logged at INFO and WARNING levels. While entity names are generally not sensitive, logging raw user input could be a concern in some contexts.
+- **Note:** Current implementation follows project patterns (similar to wikidata.py), so this is acceptable.
+
+#### ISSUE 4 - MINOR: Normalization Doesn't Handle Unicode Lookalikes
+- **File:** `src/ignifer/aggregation/entity_resolver.py` (Lines 188-214)
+- **Severity:** MINOR (noted, not fixed)
+- **Problem:** The `_normalize` method removes diacritics but doesn't handle Unicode homoglyph attacks (e.g., Cyrillic 'i' vs Latin 'i').
+- **Note:** This is a nice-to-have improvement for a future story, not blocking for entity resolution.
+
+### Fixes Applied
+
+1. **Added Pydantic Field validation** to `match_confidence`:
+   ```python
+   match_confidence: float = Field(ge=0.0, le=1.0)
+   ```
+
+2. **Added 5 new tests:**
+   - `test_match_confidence_validates_range` - validates confidence range enforcement
+   - `test_resolve_empty_string_returns_failed` - empty input handling
+   - `test_resolve_whitespace_only_returns_failed` - whitespace-only input
+   - `test_resolve_wikidata_result_without_qid` - wikidata no-QID edge case
+   - `test_resolve_failed_with_similar_entity_suggestions` - "Did you mean" suggestions
+
+### Verification
+
+- **All 38 tests pass** (33 original + 5 new)
+- **Coverage:** 99% (up from 98%)
+- **mypy strict:** No issues found
+- **ruff:** All checks passed
+
+### Architecture Compliance
+
+- **Entity resolution stops at first match:** VERIFIED (tests confirm early exit)
+- **Resolution tier logged:** VERIFIED
+- **stdlib logging only:** VERIFIED
+- **snake_case for JSON fields:** VERIFIED
+- **Pydantic ConfigDict:** VERIFIED
+
+### Final Outcome
+
+**APPROVED** - All blocking issues have been fixed. The implementation correctly implements tiered entity resolution with proper early exit, type safety, and good test coverage.
