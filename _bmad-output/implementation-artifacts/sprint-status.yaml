@@ -71,6 +71,9 @@ development_status:
   # Story 6.2: OpenSanctions Adapter
   6-2-opensanctions-adapter: done
 
+  # Story 6.3: Conflict Analysis Tool
+  6-3-conflict-analysis-tool: done
+
   # Epic 7: Multi-Source Correlation
   epic-7: backlog
 
