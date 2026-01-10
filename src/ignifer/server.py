@@ -14,6 +14,7 @@ from ignifer.adapters import (
     AdapterAuthError,
     AdapterError,
     AdapterTimeoutError,
+    AISStreamAdapter,
     GDELTAdapter,
     OpenSkyAdapter,
     WikidataAdapter,
@@ -41,6 +42,7 @@ _adapter: GDELTAdapter | None = None
 _worldbank: WorldBankAdapter | None = None
 _wikidata: WikidataAdapter | None = None
 _opensky: OpenSkyAdapter | None = None
+_aisstream: AISStreamAdapter | None = None
 _entity_resolver: EntityResolver | None = None
 _formatter: OutputFormatter | None = None
 
@@ -80,6 +82,13 @@ def _get_opensky() -> OpenSkyAdapter:
     return _opensky
 
 
+def _get_aisstream() -> AISStreamAdapter:
+    global _aisstream
+    if _aisstream is None:
+        _aisstream = AISStreamAdapter(cache=_get_cache())
+    return _aisstream
+
+
 def _get_entity_resolver() -> EntityResolver:
     global _entity_resolver
     if _entity_resolver is None:
@@ -96,7 +105,7 @@ def _get_formatter() -> OutputFormatter:
 
 async def _cleanup_resources() -> None:
     """Close all open resources (adapters, cache connections)."""
-    global _adapter, _worldbank, _wikidata, _opensky, _entity_resolver, _cache
+    global _adapter, _worldbank, _wikidata, _opensky, _aisstream, _entity_resolver, _cache
 
     # Clear entity resolver first (it references wikidata adapter)
     _entity_resolver = None
@@ -107,6 +116,7 @@ async def _cleanup_resources() -> None:
         (_worldbank, "_worldbank"),
         (_wikidata, "_wikidata"),
         (_opensky, "_opensky"),
+        (_aisstream, "_aisstream"),
     ]
     for adapter, name in adapters:
         if adapter is not None:
@@ -1629,6 +1639,566 @@ async def track_flight(identifier: str) -> str:
 
     except Exception as e:
         logger.exception(f"Unexpected error tracking flight {identifier}: {e}")
+        return (
+            f"## Error\n\n"
+            f"An unexpected error occurred while tracking **{identifier}**.\n\n"
+            f"Please try again later."
+        )
+
+
+# =============================================================================
+# Vessel Tracking Tool
+# =============================================================================
+
+
+# Navigational status codes from AIS spec
+NAVIGATIONAL_STATUS_MAP = {
+    0: "Under way using engine",
+    1: "At anchor",
+    2: "Not under command",
+    3: "Restricted manoeuvrability",
+    4: "Constrained by draught",
+    5: "Moored",
+    6: "Aground",
+    7: "Engaged in fishing",
+    8: "Under way sailing",
+    9: "Reserved (HSC)",
+    10: "Reserved (WIG)",
+    11: "Reserved",
+    12: "Reserved",
+    13: "Reserved",
+    14: "AIS-SART (active)",
+    15: "Not defined",
+}
+
+
+# Vessel type categories from AIS spec (simplified)
+VESSEL_TYPE_MAP = {
+    20: "Wing in ground",
+    30: "Fishing",
+    31: "Towing",
+    32: "Towing (large)",
+    33: "Dredging/Underwater ops",
+    34: "Diving ops",
+    35: "Military ops",
+    36: "Sailing",
+    37: "Pleasure craft",
+    40: "High speed craft",
+    50: "Pilot vessel",
+    51: "Search and Rescue",
+    52: "Tug",
+    53: "Port tender",
+    54: "Anti-pollution",
+    55: "Law enforcement",
+    58: "Medical transport",
+    59: "Special craft",
+    60: "Passenger",
+    70: "Cargo",
+    80: "Tanker",
+    90: "Other",
+}
+
+
+def _identify_vessel_identifier(identifier: str) -> tuple[str, str]:
+    """Identify the type of vessel identifier and normalize it.
+
+    Detects whether the identifier is:
+    - MMSI: 9 digits (e.g., '367596480', '353136000')
+    - IMO: 'IMO' prefix + 7 digits (e.g., 'IMO 9811000', 'IMO9811000')
+    - Vessel name: everything else (e.g., 'Ever Given', 'MAERSK ALABAMA')
+
+    Args:
+        identifier: Vessel identifier string
+
+    Returns:
+        Tuple of (identifier_type, normalized_value) where identifier_type is
+        one of 'mmsi', 'imo', or 'vessel_name'
+    """
+    # Normalize: strip whitespace
+    normalized = identifier.strip()
+
+    # Check for MMSI: exactly 9 digits
+    if normalized.isdigit() and len(normalized) == 9:
+        return ("mmsi", normalized)
+
+    # Check for IMO number: "IMO" followed by 7 digits
+    # Handle various formats: "IMO 9811000", "IMO9811000", "imo 9811000"
+    upper = normalized.upper()
+    if upper.startswith("IMO"):
+        # Extract digits after "IMO"
+        rest = upper[3:].strip()
+        if rest.isdigit() and len(rest) == 7:
+            return ("imo", rest)
+
+    # Default to vessel name
+    return ("vessel_name", normalized)
+
+
+def _get_vessel_type_name(vessel_type: int | None) -> str:
+    """Get human-readable vessel type from AIS type code.
+
+    Args:
+        vessel_type: AIS vessel type code (0-99), or None
+
+    Returns:
+        Human-readable vessel type string
+    """
+    if vessel_type is None:
+        return "Unknown"
+
+    # Exact match first
+    if vessel_type in VESSEL_TYPE_MAP:
+        return VESSEL_TYPE_MAP[vessel_type]
+
+    # Check ranges for common types
+    if 20 <= vessel_type <= 29:
+        return "Wing in ground"
+    if 30 <= vessel_type <= 39:
+        return VESSEL_TYPE_MAP.get(vessel_type, "Fishing/Service")
+    if 40 <= vessel_type <= 49:
+        return "High speed craft"
+    if 50 <= vessel_type <= 59:
+        return VESSEL_TYPE_MAP.get(vessel_type, "Special craft")
+    if 60 <= vessel_type <= 69:
+        return "Passenger"
+    if 70 <= vessel_type <= 79:
+        return "Cargo"
+    if 80 <= vessel_type <= 89:
+        return "Tanker"
+    if 90 <= vessel_type <= 99:
+        return "Other"
+
+    return f"Type {vessel_type}"
+
+
+def _get_navigational_status_name(status: int | None) -> str:
+    """Get human-readable navigational status from AIS status code.
+
+    Args:
+        status: AIS navigational status code (0-15), or None
+
+    Returns:
+        Human-readable status string
+    """
+    if status is None:
+        return "Unknown"
+    return NAVIGATIONAL_STATUS_MAP.get(status, f"Status {status}")
+
+
+def _format_vessel_speed(sog: float | None) -> str:
+    """Format speed over ground in knots and km/h.
+
+    Args:
+        sog: Speed over ground in knots, or None
+
+    Returns:
+        Formatted string like "12.5 kts (23.2 km/h)" or "N/A"
+    """
+    if sog is None:
+        return "N/A"
+
+    kmh = sog * 1.852
+    return f"{sog:.1f} kts ({kmh:.1f} km/h)"
+
+
+def _get_cardinal_direction(degrees: float) -> str:
+    """Get cardinal direction from degrees (0-360).
+
+    Uses sector-based approach: N is 337.5-22.5, NE is 22.5-67.5, etc.
+
+    Args:
+        degrees: Heading or course in degrees (0-360)
+
+    Returns:
+        Cardinal direction string (e.g., "North", "Northeast")
+    """
+    # Normalize to 0-360 range
+    normalized = degrees % 360
+
+    # Sector boundaries (each sector is 45 degrees centered on the direction)
+    if normalized >= 337.5 or normalized < 22.5:
+        return "North"
+    elif normalized < 67.5:
+        return "Northeast"
+    elif normalized < 112.5:
+        return "East"
+    elif normalized < 157.5:
+        return "Southeast"
+    elif normalized < 202.5:
+        return "South"
+    elif normalized < 247.5:
+        return "Southwest"
+    elif normalized < 292.5:
+        return "West"
+    else:
+        return "Northwest"
+
+
+def _format_vessel_course(cog: float | None) -> str:
+    """Format course over ground in degrees with cardinal direction.
+
+    Args:
+        cog: Course over ground in degrees (0-360), or None
+
+    Returns:
+        Formatted string like "225 (Southwest)" or "N/A"
+    """
+    if cog is None:
+        return "N/A"
+
+    direction = _get_cardinal_direction(cog)
+    return f"{cog:.0f} ({direction})"
+
+
+def _format_vessel_heading(heading: int | None) -> str:
+    """Format vessel heading in degrees with cardinal direction.
+
+    Args:
+        heading: True heading in degrees (0-359), or None.
+                 AIS value 511 means "not available".
+
+    Returns:
+        Formatted string like "312 (Northwest)" or "N/A"
+    """
+    if heading is None or heading == 511:  # 511 = not available in AIS spec
+        return "N/A"
+
+    direction = _get_cardinal_direction(float(heading))
+    return f"{heading} ({direction})"
+
+
+def _format_vessel_position_coords(lat: float | None, lon: float | None) -> str:
+    """Format latitude/longitude as human-readable coordinates.
+
+    Args:
+        lat: Latitude in degrees
+        lon: Longitude in degrees
+
+    Returns:
+        Formatted string like "31.2340N, 32.3456E" or "N/A"
+    """
+    if lat is None or lon is None:
+        return "N/A"
+
+    lat_dir = "N" if lat >= 0 else "S"
+    lon_dir = "E" if lon >= 0 else "W"
+
+    return f"{abs(lat):.4f}{lat_dir}, {abs(lon):.4f}{lon_dir}"
+
+
+def _is_vessel_stationary(nav_status: int | None, sog: float | None) -> tuple[bool, str]:
+    """Determine if vessel is stationary and why.
+
+    Args:
+        nav_status: Navigational status code
+        sog: Speed over ground in knots
+
+    Returns:
+        Tuple of (is_stationary, reason)
+    """
+    # Check navigational status first
+    if nav_status == 1:  # At anchor
+        return (True, "At anchor")
+    if nav_status == 5:  # Moored
+        return (True, "Moored")
+    if nav_status == 6:  # Aground
+        return (True, "Aground")
+
+    # Check speed (< 0.5 kts is effectively stationary)
+    if sog is not None and sog < 0.5:
+        return (True, "Stationary (speed < 0.5 kts)")
+
+    return (False, "")
+
+
+def _format_vessel_output(
+    identifier: str,
+    position_data: dict[str, Any] | None,
+    retrieved_at: datetime,
+) -> str:
+    """Format vessel tracking data for user-friendly output.
+
+    Args:
+        identifier: Original identifier provided by user
+        position_data: Vessel position dict from AISStreamAdapter, or None
+        retrieved_at: When data was retrieved
+
+    Returns:
+        Formatted string with vessel tracking information
+    """
+    # Get vessel name for display
+    display_name = identifier.upper()
+    if position_data and position_data.get("vessel_name"):
+        display_name = position_data["vessel_name"].upper()
+
+    output = f"VESSEL TRACKING: {display_name}\n"
+    output += "=" * 55 + "\n\n"
+
+    if position_data is None:
+        # Vessel not currently broadcasting
+        output += "CURRENT POSITION:\n"
+        output += "  Status: Vessel not currently broadcasting AIS\n\n"
+        output += "NOTE: This vessel is not currently visible in the AIS network.\n"
+        output += "Possible reasons:\n"
+        output += "  - AIS transponder is turned off or malfunctioning\n"
+        output += "  - Vessel is outside AIS receiver coverage area\n"
+        output += "  - Vessel is in port with shore-power AIS disabled\n"
+        output += "  - Some vessels intentionally disable AIS for security\n\n"
+    else:
+        # Extract position data
+        lat = position_data.get("latitude")
+        lon = position_data.get("longitude")
+        sog = position_data.get("speed_over_ground")
+        cog = position_data.get("course_over_ground")
+        heading = position_data.get("heading")
+        nav_status = position_data.get("navigational_status")
+        timestamp = position_data.get("timestamp")
+
+        # Check if stationary
+        is_stationary, stationary_reason = _is_vessel_stationary(nav_status, sog)
+
+        output += "CURRENT POSITION:\n"
+        output += f"  Location: {_format_vessel_position_coords(lat, lon)}\n"
+        output += f"  Speed: {_format_vessel_speed(sog)}\n"
+        output += f"  Course: {_format_vessel_course(cog)}\n"
+        formatted_heading = _format_vessel_heading(heading)
+        if formatted_heading != "N/A":
+            output += f"  Heading: {formatted_heading}\n"
+        output += f"  Status: {_get_navigational_status_name(nav_status)}\n"
+
+        if is_stationary:
+            output += f"  ** {stationary_reason} **\n"
+
+        output += "\n"
+
+        # Vessel info section
+        output += "VESSEL INFO:\n"
+        mmsi = position_data.get("mmsi")
+        if mmsi:
+            output += f"  MMSI: {mmsi}\n"
+        imo = position_data.get("imo")
+        if imo:
+            output += f"  IMO: {imo}\n"
+        vessel_type = position_data.get("vessel_type")
+        output += f"  Type: {_get_vessel_type_name(vessel_type)}\n"
+        country = position_data.get("country")
+        if country:
+            output += f"  Flag: {country}\n"
+        destination = position_data.get("destination")
+        if destination:
+            output += f"  Destination: {destination}\n"
+        eta = position_data.get("eta")
+        if eta:
+            output += f"  ETA: {eta}\n"
+
+        output += "\n"
+
+        # AIS update timestamp
+        if timestamp:
+            output += f"Last AIS Update: {timestamp}\n"
+
+    output += "\n"
+
+    # Footer
+    output += "-" * 55 + "\n"
+    timestamp_str = retrieved_at.strftime("%Y-%m-%d %H:%M:%S UTC")
+    output += f"Source: AISStream (retrieved {timestamp_str})\n"
+    output += "=" * 55 + "\n"
+
+    return output
+
+
+def _format_vessel_credentials_error() -> str:
+    """Format error message when AISStream credentials are not configured.
+
+    Returns:
+        Formatted error message with registration instructions
+    """
+    return (
+        "## AISStream Authentication Required\n\n"
+        "Vessel tracking requires an AISStream API key.\n\n"
+        "**How to configure:**\n\n"
+        "1. Register for a free account at: https://aisstream.io/\n"
+        "2. Get your API key from the AISStream dashboard\n"
+        "3. Configure credentials via environment variable:\n"
+        "   ```\n"
+        "   export IGNIFER_AISSTREAM_KEY=your_api_key\n"
+        "   ```\n"
+        "   Or add to ~/.config/ignifer/config.toml:\n"
+        "   ```toml\n"
+        '   aisstream_key = "your_api_key"\n'
+        "   ```\n\n"
+        "**Why AISStream:**\n"
+        "- Free tier available for hobbyists\n"
+        "- Real-time global AIS data via WebSocket\n"
+        "- Covers 99%+ of commercial shipping\n"
+    )
+
+
+def _format_vessel_disambiguation(
+    matches: list[dict[str, Any]],
+    query: str,
+) -> str:
+    """Format multiple vessel matches for disambiguation.
+
+    Args:
+        matches: List of vessel position dicts
+        query: Original query string
+
+    Returns:
+        Formatted disambiguation message
+    """
+    output = "## Multiple Vessels Found\n\n"
+    output += f'Found {len(matches)} vessels matching "{query}". Please specify:\n\n'
+
+    for i, vessel in enumerate(matches[:5], 1):
+        name = vessel.get("vessel_name", "Unknown")
+        mmsi = vessel.get("mmsi", "N/A")
+        imo = vessel.get("imo")
+        vessel_type = _get_vessel_type_name(vessel.get("vessel_type"))
+        country = vessel.get("country", "Unknown")
+        destination = vessel.get("destination", "N/A")
+
+        output += f"{i}. **{name}** (MMSI: {mmsi})\n"
+        output += f"   Type: {vessel_type} | Flag: {country}\n"
+        if imo:
+            output += f"   IMO: {imo}\n"
+        if destination and destination != "N/A":
+            output += f"   Destination: {destination}\n"
+        output += "\n"
+
+    output += "**Tip:** Use MMSI or IMO number for precise lookup.\n"
+    output += 'Example: `track_vessel(identifier="367596480")` for MMSI\n'
+    output += 'Example: `track_vessel(identifier="IMO 9811000")` for IMO\n'
+
+    return output
+
+
+@mcp.tool()
+async def track_vessel(identifier: str) -> str:
+    """Track any vessel by name, IMO number, or MMSI.
+
+    Returns current position, speed, heading, and vessel details from
+    real-time AIS (Automatic Identification System) data via AISStream.
+
+    Args:
+        identifier: Vessel identifier. Accepts:
+            - MMSI: 9 digits (e.g., "367596480", "353136000")
+            - IMO: "IMO" + 7 digits (e.g., "IMO 9811000", "IMO9811000")
+            - Vessel name: Ship name (e.g., "Ever Given", "MAERSK ALABAMA")
+
+    Returns:
+        Formatted vessel tracking report including position, speed, heading,
+        vessel type, destination, and flag state. Or helpful error if not found.
+
+    Note:
+        AIS coverage is global but not 100%. Vessels may not be visible when:
+        - AIS transponder is disabled or malfunctioning
+        - In port with shore-based equipment
+        - Some vessels intentionally disable AIS for security
+    """
+    # Validate identifier is not empty
+    if not identifier or not identifier.strip():
+        return (
+            "## Invalid Identifier\n\n"
+            "Please provide a valid vessel identifier.\n\n"
+            "**Accepted formats:**\n"
+            "- MMSI: 367596480 (9 digits)\n"
+            "- IMO: IMO 9811000 (IMO + 7 digits)\n"
+            "- Vessel name: Ever Given"
+        )
+
+    logger.info(f"Track vessel requested for: {identifier}")
+
+    # Identify and normalize the identifier
+    identifier_type, normalized = _identify_vessel_identifier(identifier)
+    logger.debug(f"Identifier type: {identifier_type}, normalized: {normalized}")
+
+    try:
+        aisstream = _get_aisstream()
+        retrieved_at = datetime.now(timezone.utc)
+
+        position_data: dict[str, Any] | None = None
+
+        if identifier_type == "mmsi":
+            # Direct MMSI lookup
+            result = await aisstream.get_vessel_position(normalized)
+
+            if result.status == ResultStatus.SUCCESS and result.results:
+                position_data = result.results[0]
+            elif result.status == ResultStatus.NO_DATA:
+                # Vessel not broadcasting
+                return _format_vessel_output(identifier, None, retrieved_at)
+            elif result.status == ResultStatus.RATE_LIMITED:
+                return (
+                    "## Rate Limited\n\n"
+                    "AISStream is rate limiting requests.\n\n"
+                    "**Suggestions:**\n"
+                    "- Wait a few minutes before trying again\n"
+                    "- Check your API key usage limits"
+                )
+
+        elif identifier_type == "imo":
+            # IMO lookup - need to search since AISStream filters by MMSI
+            # For now, return a helpful message about IMO lookup limitations
+            return (
+                f"## IMO Lookup\n\n"
+                f"IMO number **{normalized}** requires vessel database lookup.\n\n"
+                f"**Current limitation:** AISStream filters by MMSI, not IMO.\n"
+                f"IMO to MMSI resolution requires an additional vessel database.\n\n"
+                f"**Suggestions:**\n"
+                f"- Search for the vessel name instead\n"
+                f"- Use the vessel's MMSI if known (9 digits)\n"
+                f"- Look up MMSI from IMO at: https://www.marinetraffic.com\n"
+            )
+
+        elif identifier_type == "vessel_name":
+            # Vessel name search - AISStream doesn't support name search directly
+            # We would need a separate vessel database or search API
+            return (
+                f"## Vessel Name Search\n\n"
+                f'Searching for vessel **"{normalized}"**.\n\n'
+                f"**Current limitation:** AISStream requires MMSI for queries.\n"
+                f"Vessel name to MMSI resolution requires an additional database.\n\n"
+                f"**Suggestions:**\n"
+                f"- Use the vessel's MMSI if known (9 digits)\n"
+                f"- Use the vessel's IMO number (IMO + 7 digits)\n"
+                f"- Look up MMSI from vessel name at:\n"
+                f"  - https://www.marinetraffic.com\n"
+                f"  - https://www.vesselfinder.com\n"
+            )
+
+        # Format output
+        return _format_vessel_output(identifier, position_data, retrieved_at)
+
+    except AdapterAuthError:
+        logger.warning("AISStream credentials not configured")
+        return _format_vessel_credentials_error()
+
+    except AdapterTimeoutError as e:
+        logger.warning(f"Timeout tracking vessel {identifier}: {e}")
+        return (
+            f"## Request Timed Out\n\n"
+            f"The vessel tracking request for **{identifier}** timed out.\n\n"
+            f"**Suggestions:**\n"
+            f"- Try again in a moment\n"
+            f"- Check your network connection\n"
+            f"- AISStream may be experiencing high load"
+        )
+
+    except AdapterError as e:
+        logger.error(f"Adapter error tracking vessel {identifier}: {e}")
+        return (
+            f"## Unable to Track Vessel\n\n"
+            f"Could not track vessel **{identifier}**.\n\n"
+            f"**What happened:** {e.message}\n\n"
+            f"**Suggestions:**\n"
+            f"- Try again in a few moments\n"
+            f"- Verify the identifier format"
+        )
+
+    except Exception as e:
+        logger.exception(f"Unexpected error tracking vessel {identifier}: {e}")
         return (
             f"## Error\n\n"
             f"An unexpected error occurred while tracking **{identifier}**.\n\n"
