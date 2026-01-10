@@ -805,3 +805,465 @@ class TestDeepDiveTool:
             # Should still return a valid report, even if empty
             assert "DEEP DIVE INTELLIGENCE REPORT" in result
             assert "No findings" in result or "REMOTE" in result
+
+
+# ============================================================================
+# RIGOR MODE INTEGRATION TESTS
+# ============================================================================
+
+from ignifer.config import reset_settings
+from ignifer.server import entity_lookup, sanctions_check
+
+
+class TestBriefingRigorMode:
+    """Integration tests for briefing tool with rigor mode."""
+
+    @pytest.mark.asyncio
+    async def test_briefing_rigor_mode_includes_confidence_language(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Briefing with rigor=True includes ICD 203 confidence language."""
+        reset_settings()
+        monkeypatch.setenv("IGNIFER_RIGOR_MODE", "false")
+
+        mock_result = OSINTResult(
+            status=ResultStatus.SUCCESS,
+            query="Ukraine",
+            results=[{"title": "Test", "domain": "test.com", "url": "https://test.com"}],
+            sources=[
+                SourceAttribution(
+                    source="gdelt",
+                    quality=QualityTier.MEDIUM,
+                    confidence=ConfidenceLevel.LIKELY,
+                    metadata=SourceMetadata(
+                        source_name="gdelt",
+                        source_url="https://api.gdeltproject.org/",
+                        retrieved_at=datetime.now(timezone.utc),
+                    ),
+                )
+            ],
+            retrieved_at=datetime.now(timezone.utc),
+        )
+
+        with patch("ignifer.server._get_adapter") as mock_adapter:
+            adapter_instance = AsyncMock()
+            adapter_instance.query.return_value = mock_result
+            mock_adapter.return_value = adapter_instance
+
+            result = await briefing.fn("Ukraine", rigor=True)
+
+            # Should include IC confidence language
+            assert "RIGOR MODE ANALYSIS" in result
+            assert "Confidence Assessment" in result
+            # ICD 203 confidence phrasing
+            assert "confidence" in result.lower()
+            assert "assess" in result.lower()
+
+    @pytest.mark.asyncio
+    async def test_briefing_rigor_mode_includes_bibliography(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Briefing with rigor=True includes bibliography section."""
+        reset_settings()
+        monkeypatch.setenv("IGNIFER_RIGOR_MODE", "false")
+
+        mock_result = OSINTResult(
+            status=ResultStatus.SUCCESS,
+            query="Syria",
+            results=[{"title": "Test", "domain": "test.com", "url": "https://test.com"}],
+            sources=[
+                SourceAttribution(
+                    source="gdelt",
+                    quality=QualityTier.MEDIUM,
+                    confidence=ConfidenceLevel.LIKELY,
+                    metadata=SourceMetadata(
+                        source_name="gdelt",
+                        source_url="https://api.gdeltproject.org/",
+                        retrieved_at=datetime.now(timezone.utc),
+                    ),
+                )
+            ],
+            retrieved_at=datetime.now(timezone.utc),
+        )
+
+        with patch("ignifer.server._get_adapter") as mock_adapter:
+            adapter_instance = AsyncMock()
+            adapter_instance.query.return_value = mock_result
+            mock_adapter.return_value = adapter_instance
+
+            result = await briefing.fn("Syria", rigor=True)
+
+            # Should include bibliography section
+            assert "Sources" in result or "SOURCES" in result
+            # Should include analytical caveats
+            assert "Caveats" in result
+            # Should include source attribution
+            assert "GDELT" in result
+
+    @pytest.mark.asyncio
+    async def test_briefing_default_no_rigor(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Briefing without rigor param uses global default (False)."""
+        reset_settings()
+        monkeypatch.setenv("IGNIFER_RIGOR_MODE", "false")
+
+        mock_result = OSINTResult(
+            status=ResultStatus.SUCCESS,
+            query="Taiwan",
+            results=[{"title": "Test", "domain": "test.com", "url": "https://test.com"}],
+            sources=[
+                SourceAttribution(
+                    source="gdelt",
+                    quality=QualityTier.MEDIUM,
+                    confidence=ConfidenceLevel.LIKELY,
+                    metadata=SourceMetadata(
+                        source_name="gdelt",
+                        source_url="https://api.gdeltproject.org/",
+                        retrieved_at=datetime.now(timezone.utc),
+                    ),
+                )
+            ],
+            retrieved_at=datetime.now(timezone.utc),
+        )
+
+        with patch("ignifer.server._get_adapter") as mock_adapter:
+            adapter_instance = AsyncMock()
+            adapter_instance.query.return_value = mock_result
+            mock_adapter.return_value = adapter_instance
+
+            result = await briefing.fn("Taiwan")
+
+            # Should NOT include rigor mode sections
+            assert "RIGOR MODE ANALYSIS" not in result
+            # Standard output should still work
+            assert "INTELLIGENCE BRIEFING" in result
+
+
+class TestDeepDiveRigorMode:
+    """Integration tests for deep_dive tool with rigor mode."""
+
+    @pytest.fixture
+    def mock_relevance_result(self) -> RelevanceResult:
+        """Create a mock relevance analysis result."""
+        return RelevanceResult(
+            query="Myanmar",
+            query_type="country",
+            sources=[
+                SourceRelevance(
+                    source_name="gdelt",
+                    score=RelevanceScore.HIGH,
+                    reasoning="GDELT provides news coverage",
+                    available=True,
+                ),
+            ],
+            available_sources=["gdelt"],
+            unavailable_sources=[],
+        )
+
+    @pytest.fixture
+    def mock_aggregated_result(self) -> AggregatedResult:
+        """Create a mock aggregated result."""
+        now = datetime.now(timezone.utc)
+        return AggregatedResult(
+            query="Myanmar",
+            findings=[
+                Finding(
+                    topic="news",
+                    content="Recent events in Myanmar",
+                    sources=[
+                        SourceContribution(
+                            source_name="gdelt",
+                            data={"title": "Myanmar news"},
+                            quality_tier=QualityTier.MEDIUM,
+                            retrieved_at=now,
+                        )
+                    ],
+                    status=CorroborationStatus.SINGLE_SOURCE,
+                    corroboration_note="Single source: [gdelt]",
+                ),
+            ],
+            conflicts=[],
+            sources_queried=["gdelt"],
+            sources_failed=[],
+            overall_confidence=0.6,
+            source_attributions=[],
+        )
+
+    @pytest.mark.asyncio
+    async def test_deep_dive_rigor_mode_includes_ic_assessment(
+        self,
+        mock_relevance_result: RelevanceResult,
+        mock_aggregated_result: AggregatedResult,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Deep dive with rigor=True includes IC-standard confidence assessment."""
+        reset_settings()
+        monkeypatch.setenv("IGNIFER_RIGOR_MODE", "false")
+
+        with (
+            patch("ignifer.server._get_relevance_engine") as mock_rel_engine,
+            patch("ignifer.server._get_correlator") as mock_correlator,
+        ):
+            rel_engine = MagicMock()
+            rel_engine.analyze = AsyncMock(return_value=mock_relevance_result)
+            mock_rel_engine.return_value = rel_engine
+
+            correlator = MagicMock()
+            correlator.aggregate = AsyncMock(return_value=mock_aggregated_result)
+            mock_correlator.return_value = correlator
+
+            result = await deep_dive.fn("Myanmar", rigor=True)
+
+            # Should include rigor mode section
+            assert "RIGOR MODE ANALYSIS" in result
+            # Should include IC-standard confidence assessment
+            assert "Confidence Assessment" in result
+            # ICD 203 language
+            assert "assess" in result.lower()
+
+    @pytest.mark.asyncio
+    async def test_deep_dive_rigor_mode_includes_source_attribution(
+        self,
+        mock_relevance_result: RelevanceResult,
+        mock_aggregated_result: AggregatedResult,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Deep dive with rigor=True includes full source attribution."""
+        reset_settings()
+        monkeypatch.setenv("IGNIFER_RIGOR_MODE", "false")
+
+        with (
+            patch("ignifer.server._get_relevance_engine") as mock_rel_engine,
+            patch("ignifer.server._get_correlator") as mock_correlator,
+        ):
+            rel_engine = MagicMock()
+            rel_engine.analyze = AsyncMock(return_value=mock_relevance_result)
+            mock_rel_engine.return_value = rel_engine
+
+            correlator = MagicMock()
+            correlator.aggregate = AsyncMock(return_value=mock_aggregated_result)
+            mock_correlator.return_value = correlator
+
+            result = await deep_dive.fn("Myanmar", rigor=True)
+
+            # Should include analytical caveats
+            assert "Caveats" in result
+            # Should include bibliography
+            assert "Sources" in result or "SOURCES" in result
+
+
+class TestEntityLookupRigorMode:
+    """Integration tests for entity_lookup tool with rigor mode."""
+
+    @pytest.mark.asyncio
+    async def test_entity_lookup_rigor_includes_match_confidence(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Entity lookup with rigor=True includes explicit match confidence (FR31)."""
+        reset_settings()
+        monkeypatch.setenv("IGNIFER_RIGOR_MODE", "false")
+
+        mock_entity_result = OSINTResult(
+            status=ResultStatus.SUCCESS,
+            query="Gazprom",
+            results=[
+                {
+                    "qid": "Q102673",
+                    "label": "Gazprom",
+                    "description": "Russian energy company",
+                    "instance_of": "company",
+                    "url": "https://www.wikidata.org/wiki/Q102673",
+                }
+            ],
+            sources=[],
+            retrieved_at=datetime.now(timezone.utc),
+        )
+
+        # Mock both resolution and Wikidata lookup
+        with (
+            patch("ignifer.server._get_entity_resolver") as mock_resolver,
+            patch("ignifer.server._get_wikidata") as mock_wikidata,
+        ):
+            # Setup resolver mock
+            resolver_instance = MagicMock()
+            resolution_mock = MagicMock()
+            resolution_mock.is_successful.return_value = True
+            resolution_mock.wikidata_qid = "Q102673"
+            resolution_mock.resolution_tier.value = "exact"
+            resolution_mock.match_confidence = 0.95
+            resolution_mock.suggestions = []
+            resolver_instance.resolve = AsyncMock(return_value=resolution_mock)
+            mock_resolver.return_value = resolver_instance
+
+            # Setup wikidata mock
+            wikidata_instance = AsyncMock()
+            wikidata_instance.lookup_by_qid.return_value = mock_entity_result
+            mock_wikidata.return_value = wikidata_instance
+
+            result = await entity_lookup.fn(name="Gazprom", rigor=True)
+
+            # Should include rigor mode section
+            assert "RIGOR MODE ANALYSIS" in result
+            # Should include match confidence (FR31)
+            assert "Match Confidence" in result
+            # Should show percentage
+            assert "95%" in result or "confidence" in result.lower()
+            # Should include analytical caveats
+            assert "Caveats" in result
+
+
+class TestSanctionsCheckRigorMode:
+    """Integration tests for sanctions_check tool with rigor mode."""
+
+    @pytest.mark.asyncio
+    async def test_sanctions_check_rigor_includes_match_confidence(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Sanctions check with rigor=True includes explicit match confidence (FR31)."""
+        reset_settings()
+        monkeypatch.setenv("IGNIFER_RIGOR_MODE", "false")
+
+        # Use properly structured result data that matches OSINTResult expectations
+        mock_result = OSINTResult(
+            status=ResultStatus.SUCCESS,
+            query="Rosneft",
+            results=[
+                {
+                    "entity_id": "NK-12345",
+                    "caption": "Rosneft Oil Company",
+                    "schema": "Company",
+                    "name": "Rosneft Oil Company",
+                    "aliases": "Rosneft Corp",
+                    "birth_date": None,
+                    "nationality": "ru",
+                    "position": "",
+                    "sanctions_lists": "us_ofac_sdn, eu_fsf",
+                    "sanctions_count": 2,
+                    "is_sanctioned": True,
+                    "is_pep": False,
+                    "is_poi": False,
+                    "first_seen": "2014-07-16",
+                    "last_seen": "2024-01-15",
+                    "referents": None,
+                    "referents_count": 0,
+                    "url": "https://www.opensanctions.org/entities/NK-12345",
+                    "match_score": 0.92,
+                    "match_confidence": "VERY_LIKELY",
+                }
+            ],
+            sources=[
+                SourceAttribution(
+                    source="opensanctions",
+                    quality=QualityTier.HIGH,
+                    confidence=ConfidenceLevel.VERY_LIKELY,
+                    metadata=SourceMetadata(
+                        source_name="opensanctions",
+                        source_url="https://api.opensanctions.org/match/default",
+                        retrieved_at=datetime.now(timezone.utc),
+                    ),
+                )
+            ],
+            retrieved_at=datetime.now(timezone.utc),
+        )
+
+        with patch("ignifer.server._get_opensanctions") as mock_adapter:
+            adapter_instance = AsyncMock()
+            adapter_instance.search_entity.return_value = mock_result
+            mock_adapter.return_value = adapter_instance
+
+            result = await sanctions_check.fn(entity="Rosneft", rigor=True)
+
+            # Should include rigor mode section
+            assert "RIGOR MODE ANALYSIS" in result
+            # Should include match confidence (FR31)
+            assert "Match Confidence" in result
+            # Should show assessment
+            assert "confidence" in result.lower()
+            # Should include analytical caveats
+            assert "Caveats" in result
+            # Should include bibliography
+            assert "Sources" in result or "SOURCES" in result
+
+
+class TestRigorModeResolution:
+    """Integration tests for rigor mode parameter vs global resolution."""
+
+    @pytest.mark.asyncio
+    async def test_rigor_param_overrides_global_setting(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Explicit rigor=False should override global IGNIFER_RIGOR_MODE=true."""
+        reset_settings()
+        monkeypatch.setenv("IGNIFER_RIGOR_MODE", "true")
+
+        mock_result = OSINTResult(
+            status=ResultStatus.SUCCESS,
+            query="Iran",
+            results=[{"title": "Test", "domain": "test.com", "url": "https://test.com"}],
+            sources=[
+                SourceAttribution(
+                    source="gdelt",
+                    quality=QualityTier.MEDIUM,
+                    confidence=ConfidenceLevel.LIKELY,
+                    metadata=SourceMetadata(
+                        source_name="gdelt",
+                        source_url="https://api.gdeltproject.org/",
+                        retrieved_at=datetime.now(timezone.utc),
+                    ),
+                )
+            ],
+            retrieved_at=datetime.now(timezone.utc),
+        )
+
+        with patch("ignifer.server._get_adapter") as mock_adapter:
+            adapter_instance = AsyncMock()
+            adapter_instance.query.return_value = mock_result
+            mock_adapter.return_value = adapter_instance
+
+            # Global is true but param is False - should NOT have rigor output
+            result = await briefing.fn("Iran", rigor=False)
+
+            # Should NOT include rigor mode sections
+            assert "RIGOR MODE ANALYSIS" not in result
+            # Standard output should still work
+            assert "INTELLIGENCE BRIEFING" in result
+
+    @pytest.mark.asyncio
+    async def test_global_rigor_mode_applies_when_param_none(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """When rigor param is None, global IGNIFER_RIGOR_MODE=true should apply."""
+        reset_settings()
+        monkeypatch.setenv("IGNIFER_RIGOR_MODE", "true")
+
+        mock_result = OSINTResult(
+            status=ResultStatus.SUCCESS,
+            query="China",
+            results=[{"title": "Test", "domain": "test.com", "url": "https://test.com"}],
+            sources=[
+                SourceAttribution(
+                    source="gdelt",
+                    quality=QualityTier.MEDIUM,
+                    confidence=ConfidenceLevel.LIKELY,
+                    metadata=SourceMetadata(
+                        source_name="gdelt",
+                        source_url="https://api.gdeltproject.org/",
+                        retrieved_at=datetime.now(timezone.utc),
+                    ),
+                )
+            ],
+            retrieved_at=datetime.now(timezone.utc),
+        )
+
+        with patch("ignifer.server._get_adapter") as mock_adapter:
+            adapter_instance = AsyncMock()
+            adapter_instance.query.return_value = mock_result
+            mock_adapter.return_value = adapter_instance
+
+            # No rigor param - should use global (True)
+            result = await briefing.fn("China")
+
+            # Should include rigor mode sections due to global setting
+            assert "RIGOR MODE ANALYSIS" in result
+            assert "Confidence Assessment" in result

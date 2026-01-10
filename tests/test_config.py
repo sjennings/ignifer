@@ -198,9 +198,7 @@ class TestCredentialHelperMethods:
 
         assert settings.has_aisstream_credentials() is False
 
-    def test_empty_string_credentials_rejected(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_empty_string_credentials_rejected(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Empty string credentials should be treated as not configured."""
         monkeypatch.setenv("IGNIFER_OPENSKY_USERNAME", "")
         monkeypatch.setenv("IGNIFER_OPENSKY_PASSWORD", "")
@@ -311,9 +309,7 @@ class TestCredentialSecrecy:
         assert "opensky_username=None" in repr_str
         assert "opensky_password=None" in repr_str
 
-    def test_secretstr_prevents_accidental_logging(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_secretstr_prevents_accidental_logging(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """SecretStr should prevent accidental exposure in logs."""
         monkeypatch.setenv("IGNIFER_OPENSKY_USERNAME", "secret_user")
 
@@ -385,3 +381,94 @@ ttl_opensky = 600
         assert settings.ttl_aisstream == 900
         assert settings.ttl_worldbank == 86400
         assert settings.ttl_acled == 43200
+
+
+class TestRigorModeSetting:
+    """Tests for rigor_mode setting (Story 8.3, FR48)."""
+
+    def test_rigor_mode_default_false(self) -> None:
+        """Default rigor_mode should be False."""
+        with patch.dict(os.environ, {}, clear=True):
+            reset_settings()
+            settings = Settings()
+
+        assert settings.rigor_mode is False
+
+    def test_rigor_mode_env_true(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """IGNIFER_RIGOR_MODE=true should enable rigor mode."""
+        reset_settings()
+        monkeypatch.setenv("IGNIFER_RIGOR_MODE", "true")
+
+        settings = Settings()
+
+        assert settings.rigor_mode is True
+
+    def test_rigor_mode_env_yes(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """IGNIFER_RIGOR_MODE=yes should enable rigor mode."""
+        reset_settings()
+        monkeypatch.setenv("IGNIFER_RIGOR_MODE", "yes")
+
+        settings = Settings()
+
+        assert settings.rigor_mode is True
+
+    def test_rigor_mode_env_1(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """IGNIFER_RIGOR_MODE=1 should enable rigor mode."""
+        reset_settings()
+        monkeypatch.setenv("IGNIFER_RIGOR_MODE", "1")
+
+        settings = Settings()
+
+        assert settings.rigor_mode is True
+
+    def test_rigor_mode_case_insensitive(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """IGNIFER_RIGOR_MODE should be case insensitive."""
+        reset_settings()
+        monkeypatch.setenv("IGNIFER_RIGOR_MODE", "TRUE")
+
+        settings = Settings()
+
+        assert settings.rigor_mode is True
+
+    def test_rigor_mode_false_values(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Various false values should disable rigor mode."""
+        for value in ["false", "False", "FALSE", "0", "no", "NO"]:
+            reset_settings()
+            monkeypatch.setenv("IGNIFER_RIGOR_MODE", value)
+
+            settings = Settings()
+
+            assert settings.rigor_mode is False, f"Failed for value: {value}"
+
+    def test_rigor_mode_from_config_file(self, tmp_path: Path) -> None:
+        """rigor_mode should be loadable from config file."""
+        config_content = """
+rigor_mode = true
+"""
+        config_file = tmp_path / "config.toml"
+        config_file.write_text(config_content)
+
+        with patch("ignifer.config.CONFIG_FILE_PATH", config_file):
+            with patch.dict(os.environ, {}, clear=True):
+                reset_settings()
+                settings = Settings()
+
+        assert settings.rigor_mode is True
+
+    def test_env_overrides_config_file_for_rigor_mode(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Environment variable should override config file for rigor_mode."""
+        config_content = """
+rigor_mode = false
+"""
+        config_file = tmp_path / "config.toml"
+        config_file.write_text(config_content)
+
+        monkeypatch.setenv("IGNIFER_RIGOR_MODE", "true")
+
+        with patch("ignifer.config.CONFIG_FILE_PATH", config_file):
+            reset_settings()
+            settings = Settings()
+
+        assert settings.rigor_mode is True
