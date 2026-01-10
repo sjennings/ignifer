@@ -1,14 +1,13 @@
 """OpenSky Network adapter for live flight tracking data.
 
 OpenSky Network provides real-time global air traffic data from a network
-of ADS-B receivers. Authenticated requests have higher rate limits and
-access to more data.
+of ADS-B receivers. Uses OAuth2 client credentials flow for authentication.
 
-API Reference: https://openskynetwork.github.io/opensky-api/
+API Reference: https://openskynetwork.github.io/opensky-api/rest.html
 """
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import httpx
@@ -28,12 +27,18 @@ from ignifer.models import (
 
 logger = logging.getLogger(__name__)
 
+# OAuth2 token endpoint
+OPENSKY_TOKEN_URL = (
+    "https://auth.opensky-network.org/auth/realms/opensky-network"
+    "/protocol/openid-connect/token"
+)
+
 
 class OpenSkyAdapter:
     """OpenSky Network adapter for live aircraft tracking.
 
     Provides access to real-time aircraft positions, state vectors,
-    and flight track history. Requires authentication for full access.
+    and flight track history. Uses OAuth2 client credentials for authentication.
 
     Attributes:
         source_name: "opensky"
@@ -42,6 +47,7 @@ class OpenSkyAdapter:
 
     BASE_URL = "https://opensky-network.org"
     DEFAULT_TIMEOUT = 15.0  # seconds
+    TOKEN_REFRESH_MARGIN = 60  # Refresh token 60 seconds before expiry
 
     def __init__(self, cache: CacheManager | None = None) -> None:
         """Initialize the OpenSky adapter.
@@ -51,6 +57,9 @@ class OpenSkyAdapter:
         """
         self._client: httpx.AsyncClient | None = None
         self._cache = cache
+        # OAuth2 token state
+        self._access_token: str | None = None
+        self._token_expires_at: datetime | None = None
 
     @property
     def source_name(self) -> str:
@@ -62,40 +71,119 @@ class OpenSkyAdapter:
         """Default quality tier for this source's data."""
         return QualityTier.HIGH
 
-    def _get_auth(self) -> tuple[str, str] | None:
-        """Get Basic Auth credentials from settings.
+    def _get_oauth_credentials(self) -> tuple[str, str] | None:
+        """Get OAuth2 client credentials from settings.
 
         Returns:
-            Tuple of (username, password) or None if not configured.
+            Tuple of (client_id, client_secret) or None if not configured.
         """
         settings = get_settings()
         if not settings.has_opensky_credentials():
             return None
 
         # Use get_secret_value() to extract actual credential values
-        username = settings.opensky_username.get_secret_value()  # type: ignore[union-attr]
-        password = settings.opensky_password.get_secret_value()  # type: ignore[union-attr]
-        return (username, password)
+        client_id = settings.opensky_client_id.get_secret_value()  # type: ignore[union-attr]
+        client_secret = settings.opensky_client_secret.get_secret_value()  # type: ignore[union-attr]
+        return (client_id, client_secret)
 
-    async def _get_client(self) -> httpx.AsyncClient:
-        """Lazy initialization of HTTP client with Basic Auth.
+    async def _get_access_token(self) -> str:
+        """Get a valid OAuth2 access token, refreshing if necessary.
+
+        Returns:
+            Valid access token string.
 
         Raises:
-            AdapterAuthError: If credentials are not configured.
+            AdapterAuthError: If credentials are not configured or token request fails.
         """
-        if self._client is None:
-            auth = self._get_auth()
-            if auth is None:
-                settings = get_settings()
-                raise AdapterAuthError(
-                    self.source_name, settings.get_credential_error_message("opensky")
+        # Check if we have a valid cached token
+        if self._access_token and self._token_expires_at:
+            now = datetime.now(timezone.utc)
+            if now < self._token_expires_at - timedelta(seconds=self.TOKEN_REFRESH_MARGIN):
+                return self._access_token
+
+        # Need to get a new token
+        credentials = self._get_oauth_credentials()
+        if credentials is None:
+            settings = get_settings()
+            raise AdapterAuthError(
+                self.source_name, settings.get_credential_error_message("opensky")
+            )
+
+        client_id, client_secret = credentials
+        logger.debug("Requesting new OpenSky OAuth2 token")
+
+        async with httpx.AsyncClient(timeout=httpx.Timeout(10.0)) as token_client:
+            try:
+                response = await token_client.post(
+                    OPENSKY_TOKEN_URL,
+                    data={
+                        "grant_type": "client_credentials",
+                        "client_id": client_id,
+                        "client_secret": client_secret,
+                    },
+                    headers={"Content-Type": "application/x-www-form-urlencoded"},
                 )
 
+                if response.status_code == 401:
+                    raise AdapterAuthError(
+                        self.source_name,
+                        "Invalid OAuth2 credentials. Check your client_id and client_secret.",
+                    )
+
+                response.raise_for_status()
+                token_data = response.json()
+
+            except httpx.HTTPStatusError as e:
+                logger.error(f"OpenSky token request failed: {e}")
+                raise AdapterAuthError(
+                    self.source_name,
+                    f"Failed to obtain OAuth2 token: {e.response.status_code}",
+                ) from e
+            except httpx.HTTPError as e:
+                logger.error(f"OpenSky token request error: {e}")
+                raise AdapterAuthError(
+                    self.source_name, f"OAuth2 token request failed: {e}"
+                ) from e
+
+        # Extract token and expiration
+        self._access_token = token_data.get("access_token")
+        expires_in = token_data.get("expires_in", 1800)  # Default 30 minutes
+
+        if not self._access_token:
+            raise AdapterAuthError(
+                self.source_name, "OAuth2 response missing access_token"
+            )
+
+        self._token_expires_at = datetime.now(timezone.utc) + timedelta(seconds=expires_in)
+        logger.info(f"OpenSky OAuth2 token obtained, expires in {expires_in}s")
+
+        return self._access_token
+
+    async def _get_client(self) -> httpx.AsyncClient:
+        """Lazy initialization of HTTP client with Bearer token auth.
+
+        Returns:
+            Configured httpx.AsyncClient with current access token.
+
+        Raises:
+            AdapterAuthError: If credentials are not configured or token fails.
+        """
+        # Get valid access token (may refresh if expired)
+        token = await self._get_access_token()
+
+        # Create or update client with current token
+        if self._client is None:
             self._client = httpx.AsyncClient(
                 timeout=httpx.Timeout(self.DEFAULT_TIMEOUT),
-                headers={"User-Agent": "Ignifer/1.0"},
-                auth=auth,
+                headers={
+                    "User-Agent": "Ignifer/1.0",
+                    "Authorization": f"Bearer {token}",
+                },
             )
+        else:
+            # Update the authorization header with fresh token
+            self._client.headers["Authorization"] = f"Bearer {token}"
+
         return self._client
 
     def _parse_state_vector(self, state: list[Any]) -> dict[str, Any]:

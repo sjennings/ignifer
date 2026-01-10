@@ -78,10 +78,28 @@ development_status:
   6-4-sanctions-check-tool: done
 
   # Epic 7: Multi-Source Correlation
-  epic-7: backlog
+  epic-7: done
+
+  # Story 7.1: Source Relevance Engine
+  7-1-source-relevance-engine: done
+
+  # Story 7.2: Aggregator & Correlation Module
+  7-2-aggregator-correlation-module: done
+
+  # Story 7.3: Deep Dive Tool
+  7-3-deep-dive-tool: done
 
   # Epic 8: Rigor Mode & Citation Framework
-  epic-8: backlog
+  epic-8: done
+
+  # Story 8.1: ICD 203 Confidence Framework
+  8-1-icd-203-confidence-framework: done
+
+  # Story 8.2: Citation & Attribution System
+  8-2-citation-attribution-system: done
+
+  # Story 8.3: Rigor Mode Integration
+  8-3-rigor-mode-integration: done
 
   # Epic 9: System Administration & Power Features
   epic-9: backlog

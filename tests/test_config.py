@@ -20,24 +20,24 @@ class TestSettingsFromEnvironment:
 
     def test_opensky_credentials_from_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """OpenSky credentials should be loaded from environment variables."""
-        monkeypatch.setenv("IGNIFER_OPENSKY_USERNAME", "test_user")
-        monkeypatch.setenv("IGNIFER_OPENSKY_PASSWORD", "test_pass")
+        monkeypatch.setenv("IGNIFER_OPENSKY_CLIENT_ID", "test_user")
+        monkeypatch.setenv("IGNIFER_OPENSKY_CLIENT_SECRET", "test_pass")
 
         settings = Settings()
 
-        assert settings.opensky_username is not None
-        assert settings.opensky_username.get_secret_value() == "test_user"
-        assert settings.opensky_password is not None
-        assert settings.opensky_password.get_secret_value() == "test_pass"
+        assert settings.opensky_client_id is not None
+        assert settings.opensky_client_id.get_secret_value() == "test_user"
+        assert settings.opensky_client_secret is not None
+        assert settings.opensky_client_secret.get_secret_value() == "test_pass"
 
-    def test_acled_key_from_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """ACLED key should be loaded from environment variable."""
-        monkeypatch.setenv("IGNIFER_ACLED_KEY", "acled_test_key")
+    def test_acled_password_from_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """ACLED password should be loaded from environment variable."""
+        monkeypatch.setenv("IGNIFER_ACLED_PASSWORD", "acled_test_password")
 
         settings = Settings()
 
-        assert settings.acled_key is not None
-        assert settings.acled_key.get_secret_value() == "acled_test_key"
+        assert settings.acled_password is not None
+        assert settings.acled_password.get_secret_value() == "acled_test_password"
 
     def test_aisstream_key_from_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """AISStream key should be loaded from environment variable."""
@@ -54,9 +54,9 @@ class TestSettingsFromEnvironment:
         with patch.dict(os.environ, {}, clear=True):
             settings = Settings()
 
-        assert settings.opensky_username is None
-        assert settings.opensky_password is None
-        assert settings.acled_key is None
+        assert settings.opensky_client_id is None
+        assert settings.opensky_client_secret is None
+        assert settings.acled_password is None
         assert settings.aisstream_key is None
 
 
@@ -66,9 +66,9 @@ class TestSettingsFromConfigFile:
     def test_load_from_config_file(self, tmp_path: Path) -> None:
         """Settings should be loaded from TOML config file."""
         config_content = """
-opensky_username = "file_user"
-opensky_password = "file_pass"
-acled_key = "file_acled_key"
+opensky_client_id = "file_user"
+opensky_client_secret = "file_pass"
+acled_password = "file_acled_password"
 aisstream_key = "file_aisstream_key"
 """
         config_file = tmp_path / "config.toml"
@@ -76,9 +76,9 @@ aisstream_key = "file_aisstream_key"
 
         config_data = _load_config_file(config_file)
 
-        assert config_data["opensky_username"] == "file_user"
-        assert config_data["opensky_password"] == "file_pass"
-        assert config_data["acled_key"] == "file_acled_key"
+        assert config_data["opensky_client_id"] == "file_user"
+        assert config_data["opensky_client_secret"] == "file_pass"
+        assert config_data["acled_password"] == "file_acled_password"
         assert config_data["aisstream_key"] == "file_aisstream_key"
 
     def test_missing_config_file_returns_empty_dict(self, tmp_path: Path) -> None:
@@ -108,24 +108,24 @@ class TestEnvironmentPrecedence:
         """Environment variables should override config file values."""
         # Create config file with values
         config_content = """
-opensky_username = "file_user"
-opensky_password = "file_pass"
+opensky_client_id = "file_user"
+opensky_client_secret = "file_pass"
 """
         config_file = tmp_path / "config.toml"
         config_file.write_text(config_content)
 
         # Set env var for username only
-        monkeypatch.setenv("IGNIFER_OPENSKY_USERNAME", "env_user")
+        monkeypatch.setenv("IGNIFER_OPENSKY_CLIENT_ID", "env_user")
 
         # Patch the config file path
         with patch("ignifer.config.CONFIG_FILE_PATH", config_file):
             settings = Settings()
 
         # Username should come from env, password from file
-        assert settings.opensky_username is not None
-        assert settings.opensky_username.get_secret_value() == "env_user"
-        assert settings.opensky_password is not None
-        assert settings.opensky_password.get_secret_value() == "file_pass"
+        assert settings.opensky_client_id is not None
+        assert settings.opensky_client_id.get_secret_value() == "env_user"
+        assert settings.opensky_client_secret is not None
+        assert settings.opensky_client_secret.get_secret_value() == "file_pass"
 
 
 class TestCredentialHelperMethods:
@@ -133,8 +133,8 @@ class TestCredentialHelperMethods:
 
     def test_has_opensky_credentials_true(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """has_opensky_credentials returns True when both set."""
-        monkeypatch.setenv("IGNIFER_OPENSKY_USERNAME", "user")
-        monkeypatch.setenv("IGNIFER_OPENSKY_PASSWORD", "pass")
+        monkeypatch.setenv("IGNIFER_OPENSKY_CLIENT_ID", "user")
+        monkeypatch.setenv("IGNIFER_OPENSKY_CLIENT_SECRET", "pass")
 
         settings = Settings()
 
@@ -144,7 +144,7 @@ class TestCredentialHelperMethods:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """has_opensky_credentials returns False when password missing."""
-        monkeypatch.setenv("IGNIFER_OPENSKY_USERNAME", "user")
+        monkeypatch.setenv("IGNIFER_OPENSKY_CLIENT_ID", "user")
 
         settings = Settings()
 
@@ -154,7 +154,7 @@ class TestCredentialHelperMethods:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """has_opensky_credentials returns False when username missing."""
-        monkeypatch.setenv("IGNIFER_OPENSKY_PASSWORD", "pass")
+        monkeypatch.setenv("IGNIFER_OPENSKY_CLIENT_SECRET", "pass")
 
         settings = Settings()
 
@@ -168,16 +168,16 @@ class TestCredentialHelperMethods:
         assert settings.has_opensky_credentials() is False
 
     def test_has_acled_credentials_true(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """has_acled_credentials returns True when both key and email are set."""
-        monkeypatch.setenv("IGNIFER_ACLED_KEY", "key")
+        """has_acled_credentials returns True when both email and password are set."""
         monkeypatch.setenv("IGNIFER_ACLED_EMAIL", "email@example.com")
+        monkeypatch.setenv("IGNIFER_ACLED_PASSWORD", "password")
 
         settings = Settings()
 
         assert settings.has_acled_credentials() is True
 
     def test_has_acled_credentials_false(self) -> None:
-        """has_acled_credentials returns False when key is not set."""
+        """has_acled_credentials returns False when credentials are not set."""
         with patch.dict(os.environ, {}, clear=True):
             settings = Settings()
 
@@ -200,9 +200,10 @@ class TestCredentialHelperMethods:
 
     def test_empty_string_credentials_rejected(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Empty string credentials should be treated as not configured."""
-        monkeypatch.setenv("IGNIFER_OPENSKY_USERNAME", "")
-        monkeypatch.setenv("IGNIFER_OPENSKY_PASSWORD", "")
-        monkeypatch.setenv("IGNIFER_ACLED_KEY", "")
+        monkeypatch.setenv("IGNIFER_OPENSKY_CLIENT_ID", "")
+        monkeypatch.setenv("IGNIFER_OPENSKY_CLIENT_SECRET", "")
+        monkeypatch.setenv("IGNIFER_ACLED_EMAIL", "")
+        monkeypatch.setenv("IGNIFER_ACLED_PASSWORD", "")
         monkeypatch.setenv("IGNIFER_AISSTREAM_KEY", "")
 
         settings = Settings()
@@ -215,8 +216,8 @@ class TestCredentialHelperMethods:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Empty username with valid password should be rejected."""
-        monkeypatch.setenv("IGNIFER_OPENSKY_USERNAME", "")
-        monkeypatch.setenv("IGNIFER_OPENSKY_PASSWORD", "valid_pass")
+        monkeypatch.setenv("IGNIFER_OPENSKY_CLIENT_ID", "")
+        monkeypatch.setenv("IGNIFER_OPENSKY_CLIENT_SECRET", "valid_pass")
 
         settings = Settings()
 
@@ -230,17 +231,18 @@ class TestCredentialErrorMessages:
         """OpenSky error message should be helpful."""
         msg = Settings.get_credential_error_message("opensky")
 
-        assert "OpenSky requires authentication" in msg
-        assert "IGNIFER_OPENSKY_USERNAME" in msg
-        assert "IGNIFER_OPENSKY_PASSWORD" in msg
+        assert "OpenSky requires OAuth2 authentication" in msg
+        assert "IGNIFER_OPENSKY_CLIENT_ID" in msg
+        assert "IGNIFER_OPENSKY_CLIENT_SECRET" in msg
         assert "~/.config/ignifer/config.toml" in msg
 
     def test_acled_error_message(self) -> None:
         """ACLED error message should be helpful."""
         msg = Settings.get_credential_error_message("acled")
 
-        assert "ACLED requires an API key" in msg
-        assert "IGNIFER_ACLED_KEY" in msg
+        assert "ACLED requires OAuth2 authentication" in msg
+        assert "IGNIFER_ACLED_EMAIL" in msg
+        assert "IGNIFER_ACLED_PASSWORD" in msg
         assert "~/.config/ignifer/config.toml" in msg
 
     def test_aisstream_error_message(self) -> None:
@@ -272,9 +274,10 @@ class TestCredentialSecrecy:
 
     def test_repr_masks_credentials(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """repr should mask credential values."""
-        monkeypatch.setenv("IGNIFER_OPENSKY_USERNAME", "secret_user")
-        monkeypatch.setenv("IGNIFER_OPENSKY_PASSWORD", "secret_pass")
-        monkeypatch.setenv("IGNIFER_ACLED_KEY", "secret_acled")
+        monkeypatch.setenv("IGNIFER_OPENSKY_CLIENT_ID", "secret_user")
+        monkeypatch.setenv("IGNIFER_OPENSKY_CLIENT_SECRET", "secret_pass")
+        monkeypatch.setenv("IGNIFER_ACLED_EMAIL", "secret_email")
+        monkeypatch.setenv("IGNIFER_ACLED_PASSWORD", "secret_acled")
         monkeypatch.setenv("IGNIFER_AISSTREAM_KEY", "secret_ais")
 
         settings = Settings()
@@ -283,6 +286,7 @@ class TestCredentialSecrecy:
         # Credentials should not appear in repr
         assert "secret_user" not in repr_str
         assert "secret_pass" not in repr_str
+        assert "secret_email" not in repr_str
         assert "secret_acled" not in repr_str
         assert "secret_ais" not in repr_str
         # But masked indication should be present
@@ -290,8 +294,8 @@ class TestCredentialSecrecy:
 
     def test_str_masks_credentials(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """str should mask credential values."""
-        monkeypatch.setenv("IGNIFER_OPENSKY_USERNAME", "secret_user")
-        monkeypatch.setenv("IGNIFER_ACLED_KEY", "secret_acled")
+        monkeypatch.setenv("IGNIFER_OPENSKY_CLIENT_ID", "secret_user")
+        monkeypatch.setenv("IGNIFER_ACLED_PASSWORD", "secret_acled")
 
         settings = Settings()
         str_repr = str(settings)
@@ -306,17 +310,17 @@ class TestCredentialSecrecy:
             settings = Settings()
 
         repr_str = repr(settings)
-        assert "opensky_username=None" in repr_str
-        assert "opensky_password=None" in repr_str
+        assert "opensky_client_id=None" in repr_str
+        assert "opensky_client_secret=None" in repr_str
 
     def test_secretstr_prevents_accidental_logging(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """SecretStr should prevent accidental exposure in logs."""
-        monkeypatch.setenv("IGNIFER_OPENSKY_USERNAME", "secret_user")
+        monkeypatch.setenv("IGNIFER_OPENSKY_CLIENT_ID", "secret_user")
 
         settings = Settings()
 
         # Direct str conversion of SecretStr should be masked
-        username = settings.opensky_username
+        username = settings.opensky_client_id
         assert username is not None
         assert str(username) == "**********"
 

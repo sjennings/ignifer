@@ -29,9 +29,9 @@ def reset_settings_fixture():
 
 @pytest.fixture
 def mock_opensky_credentials(monkeypatch):
-    """Set mock OpenSky credentials in environment."""
-    monkeypatch.setenv("IGNIFER_OPENSKY_USERNAME", "test_user")
-    monkeypatch.setenv("IGNIFER_OPENSKY_PASSWORD", "test_pass")
+    """Set mock OpenSky OAuth2 credentials in environment."""
+    monkeypatch.setenv("IGNIFER_OPENSKY_CLIENT_ID", "test_client_id")
+    monkeypatch.setenv("IGNIFER_OPENSKY_CLIENT_SECRET", "test_client_secret")
     reset_settings()  # Force reload with new env vars
     yield
     reset_settings()
@@ -40,11 +40,39 @@ def mock_opensky_credentials(monkeypatch):
 @pytest.fixture
 def clear_opensky_credentials(monkeypatch):
     """Ensure no OpenSky credentials are set."""
-    monkeypatch.delenv("IGNIFER_OPENSKY_USERNAME", raising=False)
-    monkeypatch.delenv("IGNIFER_OPENSKY_PASSWORD", raising=False)
+    monkeypatch.delenv("IGNIFER_OPENSKY_CLIENT_ID", raising=False)
+    monkeypatch.delenv("IGNIFER_OPENSKY_CLIENT_SECRET", raising=False)
     reset_settings()
     yield
     reset_settings()
+
+
+@pytest.fixture
+def mock_oauth_token(httpx_mock):
+    """Mock the OAuth2 token endpoint."""
+    httpx_mock.add_response(
+        url=re.compile(r".*auth\.opensky-network\.org.*token.*"),
+        json={
+            "access_token": "test_access_token",
+            "token_type": "Bearer",
+            "expires_in": 1800,
+        },
+    )
+    return httpx_mock
+
+
+@pytest.fixture
+def mock_opensky_with_token(mock_opensky_credentials, httpx_mock):
+    """Combined fixture: credentials + OAuth token mock."""
+    httpx_mock.add_response(
+        url=re.compile(r".*auth\.opensky-network\.org.*token.*"),
+        json={
+            "access_token": "test_access_token",
+            "token_type": "Bearer",
+            "expires_in": 1800,
+        },
+    )
+    return httpx_mock
 
 
 class TestOpenSkyAdapter:
@@ -57,9 +85,9 @@ class TestOpenSkyAdapter:
         assert adapter.base_quality_tier == QualityTier.HIGH
 
     @pytest.mark.asyncio
-    async def test_query_success(self, httpx_mock, mock_opensky_credentials) -> None:
+    async def test_query_success(self, mock_opensky_with_token) -> None:
         """Test successful query by callsign returns OSINTResult with SUCCESS status."""
-        httpx_mock.add_response(
+        mock_opensky_with_token.add_response(
             url=re.compile(r".*opensky-network\.org/api/states/all.*"),
             json=load_fixture("opensky_states.json"),
         )
@@ -78,9 +106,9 @@ class TestOpenSkyAdapter:
         await adapter.close()
 
     @pytest.mark.asyncio
-    async def test_query_multiple_matches(self, httpx_mock, mock_opensky_credentials) -> None:
+    async def test_query_multiple_matches(self, mock_opensky_with_token) -> None:
         """Test query matching multiple aircraft."""
-        httpx_mock.add_response(
+        mock_opensky_with_token.add_response(
             url=re.compile(r".*opensky-network\.org/api/states/all.*"),
             json=load_fixture("opensky_states.json"),
         )
@@ -95,9 +123,9 @@ class TestOpenSkyAdapter:
         await adapter.close()
 
     @pytest.mark.asyncio
-    async def test_query_no_match(self, httpx_mock, mock_opensky_credentials) -> None:
+    async def test_query_no_match(self, mock_opensky_with_token) -> None:
         """Test query with no matching callsign returns NO_DATA status."""
-        httpx_mock.add_response(
+        mock_opensky_with_token.add_response(
             url=re.compile(r".*opensky-network\.org/api/states/all.*"),
             json=load_fixture("opensky_states.json"),
         )
@@ -112,9 +140,9 @@ class TestOpenSkyAdapter:
         await adapter.close()
 
     @pytest.mark.asyncio
-    async def test_get_states_with_icao24(self, httpx_mock, mock_opensky_credentials) -> None:
+    async def test_get_states_with_icao24(self, mock_opensky_with_token) -> None:
         """Test get_states with specific ICAO24 returns state vector."""
-        httpx_mock.add_response(
+        mock_opensky_with_token.add_response(
             url=re.compile(r".*opensky-network\.org/api/states/all.*"),
             json=load_fixture("opensky_states.json"),
         )
@@ -127,15 +155,17 @@ class TestOpenSkyAdapter:
         assert result.sources[0].source == "opensky"
 
         # Verify request included icao24 parameter
-        request = httpx_mock.get_request()
-        assert "icao24=abc123" in str(request.url)
+        # Note: First request is OAuth token, second is states
+        requests = mock_opensky_with_token.get_requests()
+        api_request = [r for r in requests if "states/all" in str(r.url)][0]
+        assert "icao24=abc123" in str(api_request.url)
 
         await adapter.close()
 
     @pytest.mark.asyncio
-    async def test_get_states_all(self, httpx_mock, mock_opensky_credentials) -> None:
+    async def test_get_states_all(self, mock_opensky_with_token) -> None:
         """Test get_states without ICAO24 returns all states."""
-        httpx_mock.add_response(
+        mock_opensky_with_token.add_response(
             url=re.compile(r".*opensky-network\.org/api/states/all.*"),
             json=load_fixture("opensky_states.json"),
         )
@@ -150,9 +180,9 @@ class TestOpenSkyAdapter:
         await adapter.close()
 
     @pytest.mark.asyncio
-    async def test_get_track(self, httpx_mock, mock_opensky_credentials) -> None:
+    async def test_get_track(self, mock_opensky_with_token) -> None:
         """Test get_track returns flight history ordered chronologically."""
-        httpx_mock.add_response(
+        mock_opensky_with_token.add_response(
             url=re.compile(r".*opensky-network\.org/api/tracks/all.*"),
             json=load_fixture("opensky_track.json"),
         )
@@ -174,9 +204,10 @@ class TestOpenSkyAdapter:
         assert timestamps == sorted(timestamps)
 
         # Verify request parameters
-        request = httpx_mock.get_request()
-        assert "icao24=abc123" in str(request.url)
-        assert "time=0" in str(request.url)
+        requests = mock_opensky_with_token.get_requests()
+        api_request = [r for r in requests if "tracks/all" in str(r.url)][0]
+        assert "icao24=abc123" in str(api_request.url)
+        assert "time=0" in str(api_request.url)
 
         await adapter.close()
 
@@ -191,18 +222,18 @@ class TestOpenSkyAdapter:
             await adapter.query(QueryParams(query="UAL123"))
 
         assert exc_info.value.source_name == "opensky"
-        assert "IGNIFER_OPENSKY_USERNAME" in str(exc_info.value)
-        assert "IGNIFER_OPENSKY_PASSWORD" in str(exc_info.value)
+        assert "IGNIFER_OPENSKY_CLIENT_ID" in str(exc_info.value)
+        assert "IGNIFER_OPENSKY_CLIENT_SECRET" in str(exc_info.value)
 
         await adapter.close()
 
     @pytest.mark.asyncio
-    async def test_invalid_credentials_raises_auth_error(
-        self, httpx_mock, mock_opensky_credentials
+    async def test_invalid_oauth_credentials_raises_auth_error(
+        self, mock_opensky_credentials, httpx_mock
     ) -> None:
-        """Test that 401 response raises AdapterAuthError."""
+        """Test that 401 on OAuth token endpoint raises AdapterAuthError."""
         httpx_mock.add_response(
-            url=re.compile(r".*opensky-network\.org/api/states/all.*"),
+            url=re.compile(r".*auth\.opensky-network\.org.*token.*"),
             status_code=401,
         )
 
@@ -212,16 +243,16 @@ class TestOpenSkyAdapter:
             await adapter.query(QueryParams(query="UAL123"))
 
         assert exc_info.value.source_name == "opensky"
-        assert "Invalid credentials" in str(exc_info.value)
+        assert "Invalid OAuth2 credentials" in str(exc_info.value)
 
         await adapter.close()
 
     @pytest.mark.asyncio
     async def test_rate_limited_returns_rate_limited_status(
-        self, httpx_mock, mock_opensky_credentials
+        self, mock_opensky_with_token
     ) -> None:
         """Test that 429 response returns OSINTResult with RATE_LIMITED status."""
-        httpx_mock.add_response(
+        mock_opensky_with_token.add_response(
             url=re.compile(r".*opensky-network\.org/api/states/all.*"),
             status_code=429,
         )
@@ -235,9 +266,9 @@ class TestOpenSkyAdapter:
         await adapter.close()
 
     @pytest.mark.asyncio
-    async def test_get_states_rate_limited(self, httpx_mock, mock_opensky_credentials) -> None:
+    async def test_get_states_rate_limited(self, mock_opensky_with_token) -> None:
         """Test get_states with rate limiting."""
-        httpx_mock.add_response(
+        mock_opensky_with_token.add_response(
             url=re.compile(r".*opensky-network\.org/api/states/all.*"),
             status_code=429,
         )
@@ -250,9 +281,9 @@ class TestOpenSkyAdapter:
         await adapter.close()
 
     @pytest.mark.asyncio
-    async def test_get_track_rate_limited(self, httpx_mock, mock_opensky_credentials) -> None:
+    async def test_get_track_rate_limited(self, mock_opensky_with_token) -> None:
         """Test get_track with rate limiting."""
-        httpx_mock.add_response(
+        mock_opensky_with_token.add_response(
             url=re.compile(r".*opensky-network\.org/api/tracks/all.*"),
             status_code=429,
         )
@@ -266,10 +297,10 @@ class TestOpenSkyAdapter:
 
     @pytest.mark.asyncio
     async def test_timeout_raises_timeout_error(
-        self, httpx_mock, mock_opensky_credentials
+        self, mock_opensky_with_token
     ) -> None:
         """Test timeout raises AdapterTimeoutError."""
-        httpx_mock.add_exception(
+        mock_opensky_with_token.add_exception(
             httpx.TimeoutException("Connection timed out"),
             url=re.compile(r".*opensky-network\.org/api/states/all.*"),
         )
@@ -285,9 +316,9 @@ class TestOpenSkyAdapter:
         await adapter.close()
 
     @pytest.mark.asyncio
-    async def test_get_states_timeout(self, httpx_mock, mock_opensky_credentials) -> None:
+    async def test_get_states_timeout(self, mock_opensky_with_token) -> None:
         """Test get_states timeout raises AdapterTimeoutError."""
-        httpx_mock.add_exception(
+        mock_opensky_with_token.add_exception(
             httpx.TimeoutException("Connection timed out"),
             url=re.compile(r".*opensky-network\.org/api/states/all.*"),
         )
@@ -302,9 +333,9 @@ class TestOpenSkyAdapter:
         await adapter.close()
 
     @pytest.mark.asyncio
-    async def test_get_track_timeout(self, httpx_mock, mock_opensky_credentials) -> None:
+    async def test_get_track_timeout(self, mock_opensky_with_token) -> None:
         """Test get_track timeout raises AdapterTimeoutError."""
-        httpx_mock.add_exception(
+        mock_opensky_with_token.add_exception(
             httpx.TimeoutException("Connection timed out"),
             url=re.compile(r".*opensky-network\.org/api/tracks/all.*"),
         )
@@ -319,9 +350,9 @@ class TestOpenSkyAdapter:
         await adapter.close()
 
     @pytest.mark.asyncio
-    async def test_get_track_not_found(self, httpx_mock, mock_opensky_credentials) -> None:
+    async def test_get_track_not_found(self, mock_opensky_with_token) -> None:
         """Test get_track with 404 returns NO_DATA status."""
-        httpx_mock.add_response(
+        mock_opensky_with_token.add_response(
             url=re.compile(r".*opensky-network\.org/api/tracks/all.*"),
             status_code=404,
         )
@@ -336,9 +367,9 @@ class TestOpenSkyAdapter:
         await adapter.close()
 
     @pytest.mark.asyncio
-    async def test_health_check_success(self, httpx_mock, mock_opensky_credentials) -> None:
+    async def test_health_check_success(self, mock_opensky_with_token) -> None:
         """Test health check returns True when API responds."""
-        httpx_mock.add_response(
+        mock_opensky_with_token.add_response(
             url=re.compile(r".*opensky-network\.org/api/states/all.*"),
             status_code=200,
         )
@@ -362,10 +393,10 @@ class TestOpenSkyAdapter:
 
     @pytest.mark.asyncio
     async def test_health_check_failure_connection_error(
-        self, httpx_mock, mock_opensky_credentials
+        self, mock_opensky_with_token
     ) -> None:
         """Test health check returns False when API fails."""
-        httpx_mock.add_exception(
+        mock_opensky_with_token.add_exception(
             httpx.ConnectError("Connection refused"),
             url=re.compile(r".*opensky-network\.org/api/states/all.*"),
         )
@@ -378,10 +409,10 @@ class TestOpenSkyAdapter:
 
     @pytest.mark.asyncio
     async def test_empty_states_returns_no_data(
-        self, httpx_mock, mock_opensky_credentials
+        self, mock_opensky_with_token
     ) -> None:
         """Test empty states array returns NO_DATA status."""
-        httpx_mock.add_response(
+        mock_opensky_with_token.add_response(
             url=re.compile(r".*opensky-network\.org/api/states/all.*"),
             json={"time": 1704672000, "states": []},
         )
@@ -396,10 +427,10 @@ class TestOpenSkyAdapter:
 
     @pytest.mark.asyncio
     async def test_null_states_returns_no_data(
-        self, httpx_mock, mock_opensky_credentials
+        self, mock_opensky_with_token
     ) -> None:
         """Test null states returns NO_DATA status."""
-        httpx_mock.add_response(
+        mock_opensky_with_token.add_response(
             url=re.compile(r".*opensky-network\.org/api/states/all.*"),
             json={"time": 1704672000, "states": None},
         )
@@ -413,10 +444,10 @@ class TestOpenSkyAdapter:
 
     @pytest.mark.asyncio
     async def test_empty_track_returns_no_data(
-        self, httpx_mock, mock_opensky_credentials
+        self, mock_opensky_with_token
     ) -> None:
         """Test empty track path returns NO_DATA status."""
-        httpx_mock.add_response(
+        mock_opensky_with_token.add_response(
             url=re.compile(r".*opensky-network\.org/api/tracks/all.*"),
             json={"icao24": "abc123", "callsign": "UAL123", "path": []},
         )
@@ -430,9 +461,9 @@ class TestOpenSkyAdapter:
         await adapter.close()
 
     @pytest.mark.asyncio
-    async def test_state_vector_parsing(self, httpx_mock, mock_opensky_credentials) -> None:
+    async def test_state_vector_parsing(self, mock_opensky_with_token) -> None:
         """Test that state vectors are parsed correctly into named fields."""
-        httpx_mock.add_response(
+        mock_opensky_with_token.add_response(
             url=re.compile(r".*opensky-network\.org/api/states/all.*"),
             json=load_fixture("opensky_states.json"),
         )
@@ -458,9 +489,9 @@ class TestOpenSkyAdapter:
         await adapter.close()
 
     @pytest.mark.asyncio
-    async def test_query_case_insensitive(self, httpx_mock, mock_opensky_credentials) -> None:
+    async def test_query_case_insensitive(self, mock_opensky_with_token) -> None:
         """Test that callsign matching is case-insensitive."""
-        httpx_mock.add_response(
+        mock_opensky_with_token.add_response(
             url=re.compile(r".*opensky-network\.org/api/states/all.*"),
             json=load_fixture("opensky_states.json"),
         )
@@ -476,10 +507,10 @@ class TestOpenSkyAdapter:
 
     @pytest.mark.asyncio
     async def test_get_track_icao24_lowercase(
-        self, httpx_mock, mock_opensky_credentials
+        self, mock_opensky_with_token
     ) -> None:
         """Test that ICAO24 is passed to API in lowercase."""
-        httpx_mock.add_response(
+        mock_opensky_with_token.add_response(
             url=re.compile(r".*opensky-network\.org/api/tracks/all.*"),
             json=load_fixture("opensky_track.json"),
         )
@@ -491,8 +522,9 @@ class TestOpenSkyAdapter:
         assert len(result.results) == 12  # All waypoints returned
 
         # Verify request used lowercase
-        request = httpx_mock.get_request()
-        assert "icao24=abc123" in str(request.url)
+        requests = mock_opensky_with_token.get_requests()
+        api_request = [r for r in requests if "tracks/all" in str(r.url)][0]
+        assert "icao24=abc123" in str(api_request.url)
 
         await adapter.close()
 
@@ -509,9 +541,9 @@ class TestOpenSkyAdapter:
         assert adapter._client is None
 
     @pytest.mark.asyncio
-    async def test_close_client_after_use(self, httpx_mock, mock_opensky_credentials) -> None:
+    async def test_close_client_after_use(self, mock_opensky_with_token) -> None:
         """Test that close() properly cleans up HTTP client after it was used."""
-        httpx_mock.add_response(
+        mock_opensky_with_token.add_response(
             url=re.compile(r".*opensky-network\.org/api/states/all.*"),
             json=load_fixture("opensky_states.json"),
         )
@@ -527,11 +559,11 @@ class TestOpenSkyAdapter:
         assert adapter._client is None
 
     @pytest.mark.asyncio
-    async def test_invalid_json_response(self, httpx_mock, mock_opensky_credentials) -> None:
+    async def test_invalid_json_response(self, mock_opensky_with_token) -> None:
         """Test that invalid JSON response raises AdapterParseError."""
         from ignifer.adapters.base import AdapterParseError
 
-        httpx_mock.add_response(
+        mock_opensky_with_token.add_response(
             url=re.compile(r".*opensky-network\.org/api/states/all.*"),
             content=b"not valid json {{{",
             status_code=200,
@@ -549,7 +581,7 @@ class TestOpenSkyAdapter:
 
     @pytest.mark.asyncio
     @pytest.mark.httpx_mock(can_send_already_matched_responses=True)
-    async def test_cache_hit(self, httpx_mock, mock_opensky_credentials, tmp_path) -> None:
+    async def test_cache_hit(self, mock_opensky_with_token, tmp_path) -> None:
         """Test that cached results are returned without making HTTP request."""
         from ignifer.cache import CacheManager, MemoryCache, SQLiteCache
 
@@ -558,7 +590,7 @@ class TestOpenSkyAdapter:
         cache = CacheManager(l1=MemoryCache(), l2=SQLiteCache(db_path=db_path))
 
         # First request - will hit API
-        httpx_mock.add_response(
+        mock_opensky_with_token.add_response(
             url=re.compile(r".*opensky-network\.org/api/states/all.*"),
             json=load_fixture("opensky_states.json"),
         )
@@ -569,9 +601,12 @@ class TestOpenSkyAdapter:
         assert result1.status == ResultStatus.SUCCESS
         assert len(result1.results) == 1
 
-        # Verify that only one request was made to the API
-        requests_made = len(httpx_mock.get_requests())
-        assert requests_made == 1, "First query should have made exactly one HTTP request"
+        # Count API requests (excluding token requests)
+        api_requests = [
+            r for r in mock_opensky_with_token.get_requests()
+            if "states/all" in str(r.url)
+        ]
+        assert len(api_requests) == 1, "First query should have made exactly one API request"
 
         # Second request - should hit cache, not API
         result2 = await adapter.query(QueryParams(query="UAL123"))
@@ -580,18 +615,22 @@ class TestOpenSkyAdapter:
         assert len(result2.results) == 1  # Should have same data as first result
         assert result2.results[0]["callsign"] == "UAL123"
 
-        # Verify no additional HTTP requests were made (cache hit)
-        assert len(httpx_mock.get_requests()) == 1, "Second query should not have made an HTTP request (cache hit)"
+        # Verify no additional API requests were made (cache hit)
+        api_requests_after = [
+            r for r in mock_opensky_with_token.get_requests()
+            if "states/all" in str(r.url)
+        ]
+        assert len(api_requests_after) == 1, "Second query should use cache (no new API request)"
 
         await adapter.close()
         await cache.close()
 
     @pytest.mark.asyncio
-    async def test_get_track_invalid_json(self, httpx_mock, mock_opensky_credentials) -> None:
+    async def test_get_track_invalid_json(self, mock_opensky_with_token) -> None:
         """Test that invalid JSON response on track endpoint raises AdapterParseError."""
         from ignifer.adapters.base import AdapterParseError
 
-        httpx_mock.add_response(
+        mock_opensky_with_token.add_response(
             url=re.compile(r".*opensky-network\.org/api/tracks/all.*"),
             content=b"invalid json",
             status_code=200,
@@ -607,11 +646,11 @@ class TestOpenSkyAdapter:
         await adapter.close()
 
     @pytest.mark.asyncio
-    async def test_get_states_invalid_json(self, httpx_mock, mock_opensky_credentials) -> None:
+    async def test_get_states_invalid_json(self, mock_opensky_with_token) -> None:
         """Test that invalid JSON response on states endpoint raises AdapterParseError."""
         from ignifer.adapters.base import AdapterParseError
 
-        httpx_mock.add_response(
+        mock_opensky_with_token.add_response(
             url=re.compile(r".*opensky-network\.org/api/states/all.*"),
             content=b"<html>error</html>",
             status_code=200,
@@ -623,5 +662,65 @@ class TestOpenSkyAdapter:
             await adapter.get_states(icao24="abc123")
 
         assert exc_info.value.source_name == "opensky"
+
+        await adapter.close()
+
+    @pytest.mark.asyncio
+    async def test_token_refresh(self, mock_opensky_credentials, httpx_mock) -> None:
+        """Test that expired tokens are automatically refreshed."""
+        from datetime import datetime, timedelta, timezone
+        from unittest.mock import patch
+
+        # First token response
+        httpx_mock.add_response(
+            url=re.compile(r".*auth\.opensky-network\.org.*token.*"),
+            json={
+                "access_token": "token_1",
+                "token_type": "Bearer",
+                "expires_in": 1800,
+            },
+        )
+
+        # API response
+        httpx_mock.add_response(
+            url=re.compile(r".*opensky-network\.org/api/states/all.*"),
+            json=load_fixture("opensky_states.json"),
+        )
+
+        adapter = OpenSkyAdapter()
+
+        # First request gets token
+        result1 = await adapter.query(QueryParams(query="UAL123"))
+        assert result1.status == ResultStatus.SUCCESS
+
+        # Simulate token expiration
+        adapter._token_expires_at = datetime.now(timezone.utc) - timedelta(minutes=5)
+
+        # Second token response (for refresh)
+        httpx_mock.add_response(
+            url=re.compile(r".*auth\.opensky-network\.org.*token.*"),
+            json={
+                "access_token": "token_2",
+                "token_type": "Bearer",
+                "expires_in": 1800,
+            },
+        )
+
+        # Second API response
+        httpx_mock.add_response(
+            url=re.compile(r".*opensky-network\.org/api/states/all.*"),
+            json=load_fixture("opensky_states.json"),
+        )
+
+        # Second request should trigger token refresh
+        result2 = await adapter.query(QueryParams(query="UAL456"))
+        assert result2.status == ResultStatus.SUCCESS
+
+        # Verify two token requests were made
+        token_requests = [
+            r for r in httpx_mock.get_requests()
+            if "token" in str(r.url)
+        ]
+        assert len(token_requests) == 2, "Should have made two token requests"
 
         await adapter.close()

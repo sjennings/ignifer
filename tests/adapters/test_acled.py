@@ -29,9 +29,9 @@ def reset_settings_fixture():
 
 @pytest.fixture
 def mock_acled_credentials(monkeypatch):
-    """Set mock ACLED credentials in environment."""
-    monkeypatch.setenv("IGNIFER_ACLED_KEY", "test_acled_key_12345")
+    """Set mock ACLED OAuth2 credentials in environment."""
     monkeypatch.setenv("IGNIFER_ACLED_EMAIL", "test@example.com")
+    monkeypatch.setenv("IGNIFER_ACLED_PASSWORD", "test_password_12345")
     reset_settings()  # Force reload with new env vars
     yield
     reset_settings()
@@ -40,11 +40,25 @@ def mock_acled_credentials(monkeypatch):
 @pytest.fixture
 def clear_acled_credentials(monkeypatch):
     """Ensure no ACLED credentials are set."""
-    monkeypatch.delenv("IGNIFER_ACLED_KEY", raising=False)
     monkeypatch.delenv("IGNIFER_ACLED_EMAIL", raising=False)
+    monkeypatch.delenv("IGNIFER_ACLED_PASSWORD", raising=False)
     reset_settings()
     yield
     reset_settings()
+
+
+@pytest.fixture
+def mock_acled_with_token(mock_acled_credentials, httpx_mock):
+    """Combined fixture: credentials + OAuth2 token mock."""
+    httpx_mock.add_response(
+        url=re.compile(r".*acleddata\.com/oauth/token.*"),
+        json={
+            "access_token": "test_access_token",
+            "token_type": "Bearer",
+            "expires_in": 86400,
+        },
+    )
+    return httpx_mock
 
 
 class TestACLEDAdapter:
@@ -61,9 +75,9 @@ class TestACLEDAdapter:
         assert adapter.base_quality_tier == QualityTier.HIGH
 
     @pytest.mark.asyncio
-    async def test_query_success(self, httpx_mock, mock_acled_credentials) -> None:
+    async def test_query_success(self, mock_acled_with_token) -> None:
         """Test successful query returns OSINTResult with SUCCESS status."""
-        httpx_mock.add_response(
+        mock_acled_with_token.add_response(
             url=re.compile(r".*api\.acleddata\.com/acled/read.*"),
             json=load_fixture("acled_events.json"),
         )
@@ -80,9 +94,9 @@ class TestACLEDAdapter:
 
     @pytest.mark.asyncio
     @pytest.mark.httpx_mock(can_send_already_matched_responses=True)
-    async def test_query_with_date_range(self, httpx_mock, mock_acled_credentials) -> None:
+    async def test_query_with_date_range(self, mock_acled_with_token) -> None:
         """Test query with date range parameter works correctly."""
-        httpx_mock.add_response(
+        mock_acled_with_token.add_response(
             url=re.compile(r".*api\.acleddata\.com/acled/read.*"),
             json=load_fixture("acled_events.json"),
         )
@@ -96,15 +110,15 @@ class TestACLEDAdapter:
         assert len(result.results) > 0
 
         # Verify request included date parameters (may have multiple due to trend comparison)
-        requests = httpx_mock.get_requests()
+        requests = mock_acled_with_token.get_requests()
         assert any("event_date" in str(req.url) for req in requests)
 
         await adapter.close()
 
     @pytest.mark.asyncio
-    async def test_get_events_returns_events(self, httpx_mock, mock_acled_credentials) -> None:
+    async def test_get_events_returns_events(self, mock_acled_with_token) -> None:
         """Test get_events method returns conflict events."""
-        httpx_mock.add_response(
+        mock_acled_with_token.add_response(
             url=re.compile(r".*api\.acleddata\.com/acled/read.*"),
             json=load_fixture("acled_events.json"),
         )
@@ -125,11 +139,9 @@ class TestACLEDAdapter:
 
     @pytest.mark.asyncio
     @pytest.mark.httpx_mock(can_send_already_matched_responses=True)
-    async def test_get_events_with_date_range(
-        self, httpx_mock, mock_acled_credentials
-    ) -> None:
+    async def test_get_events_with_date_range(self, mock_acled_with_token) -> None:
         """Test get_events with explicit date range."""
-        httpx_mock.add_response(
+        mock_acled_with_token.add_response(
             url=re.compile(r".*api\.acleddata\.com/acled/read.*"),
             json=load_fixture("acled_events.json"),
         )
@@ -140,14 +152,14 @@ class TestACLEDAdapter:
         assert result.status == ResultStatus.SUCCESS
 
         # Verify request included date parameters (may have multiple due to trend comparison)
-        requests = httpx_mock.get_requests()
+        requests = mock_acled_with_token.get_requests()
         assert any("event_date" in str(req.url) for req in requests)
 
         await adapter.close()
 
     @pytest.mark.asyncio
-    async def test_query_no_api_key_returns_error(self, clear_acled_credentials) -> None:
-        """Test that missing API key returns helpful error message."""
+    async def test_query_no_credentials_returns_error(self, clear_acled_credentials) -> None:
+        """Test that missing credentials returns helpful error message."""
         adapter = ACLEDAdapter()
         result = await adapter.query(QueryParams(query="Syria"))
 
@@ -155,19 +167,42 @@ class TestACLEDAdapter:
         assert result.status == ResultStatus.NO_DATA
         assert result.error is not None
         assert "ACLED" in result.error
-        assert "API key" in result.error.lower() or "IGNIFER_ACLED_KEY" in result.error
-        assert "email" in result.error.lower() or "IGNIFER_ACLED_EMAIL" in result.error
+        assert "OAuth2" in result.error or "password" in result.error.lower()
+        assert "IGNIFER_ACLED_EMAIL" in result.error
+        assert "IGNIFER_ACLED_PASSWORD" in result.error
         # Check for registration link
         assert "https://acleddata.com/register/" in result.error
 
         await adapter.close()
 
     @pytest.mark.asyncio
-    async def test_query_invalid_api_key_raises_auth_error(
+    async def test_query_invalid_credentials_raises_auth_error(
         self, httpx_mock, mock_acled_credentials
     ) -> None:
-        """Test that 401 response raises AdapterAuthError."""
+        """Test that invalid OAuth2 credentials raises AdapterAuthError."""
+        # Mock token endpoint with error
         httpx_mock.add_response(
+            url=re.compile(r".*acleddata\.com/oauth/token.*"),
+            status_code=401,
+            json={"error": "invalid_grant", "error_description": "Invalid credentials"},
+        )
+
+        adapter = ACLEDAdapter()
+
+        with pytest.raises(AdapterAuthError) as exc_info:
+            await adapter.query(QueryParams(query="Syria"))
+
+        assert exc_info.value.source_name == "acled"
+        assert "Invalid" in str(exc_info.value) or "credentials" in str(exc_info.value)
+
+        await adapter.close()
+
+    @pytest.mark.asyncio
+    async def test_query_expired_token_raises_auth_error(
+        self, mock_acled_with_token
+    ) -> None:
+        """Test that 401 response from API raises AdapterAuthError."""
+        mock_acled_with_token.add_response(
             url=re.compile(r".*api\.acleddata\.com/acled/read.*"),
             status_code=401,
         )
@@ -178,33 +213,13 @@ class TestACLEDAdapter:
             await adapter.query(QueryParams(query="Syria"))
 
         assert exc_info.value.source_name == "acled"
-        assert "Invalid" in str(exc_info.value) or "API key" in str(exc_info.value)
 
         await adapter.close()
 
     @pytest.mark.asyncio
-    async def test_query_forbidden_raises_auth_error(
-        self, httpx_mock, mock_acled_credentials
-    ) -> None:
-        """Test that 403 response raises AdapterAuthError."""
-        httpx_mock.add_response(
-            url=re.compile(r".*api\.acleddata\.com/acled/read.*"),
-            status_code=403,
-        )
-
-        adapter = ACLEDAdapter()
-
-        with pytest.raises(AdapterAuthError) as exc_info:
-            await adapter.query(QueryParams(query="Syria"))
-
-        assert exc_info.value.source_name == "acled"
-
-        await adapter.close()
-
-    @pytest.mark.asyncio
-    async def test_query_no_data(self, httpx_mock, mock_acled_credentials) -> None:
+    async def test_query_no_data(self, mock_acled_with_token) -> None:
         """Test query returns NO_DATA status for regions with no events."""
-        httpx_mock.add_response(
+        mock_acled_with_token.add_response(
             url=re.compile(r".*api\.acleddata\.com/acled/read.*"),
             json={"status": 200, "success": True, "count": 0, "data": []},
         )
@@ -219,9 +234,9 @@ class TestACLEDAdapter:
         await adapter.close()
 
     @pytest.mark.asyncio
-    async def test_query_rate_limited(self, httpx_mock, mock_acled_credentials) -> None:
+    async def test_query_rate_limited(self, mock_acled_with_token) -> None:
         """Test that 429 response returns RATE_LIMITED status."""
-        httpx_mock.add_response(
+        mock_acled_with_token.add_response(
             url=re.compile(r".*api\.acleddata\.com/acled/read.*"),
             status_code=429,
         )
@@ -236,10 +251,10 @@ class TestACLEDAdapter:
 
     @pytest.mark.asyncio
     async def test_query_timeout_raises_timeout_error(
-        self, httpx_mock, mock_acled_credentials
+        self, mock_acled_with_token
     ) -> None:
         """Test that timeout raises AdapterTimeoutError."""
-        httpx_mock.add_exception(
+        mock_acled_with_token.add_exception(
             httpx.TimeoutException("Connection timed out"),
             url=re.compile(r".*api\.acleddata\.com/acled/read.*"),
         )
@@ -255,10 +270,10 @@ class TestACLEDAdapter:
 
     @pytest.mark.asyncio
     async def test_query_malformed_response_raises_parse_error(
-        self, httpx_mock, mock_acled_credentials
+        self, mock_acled_with_token
     ) -> None:
         """Test that invalid JSON raises AdapterParseError."""
-        httpx_mock.add_response(
+        mock_acled_with_token.add_response(
             url=re.compile(r".*api\.acleddata\.com/acled/read.*"),
             content=b"not valid json {{{",
             status_code=200,
@@ -275,9 +290,9 @@ class TestACLEDAdapter:
         await adapter.close()
 
     @pytest.mark.asyncio
-    async def test_health_check_success(self, httpx_mock, mock_acled_credentials) -> None:
+    async def test_health_check_success(self, mock_acled_with_token) -> None:
         """Test health check returns True when API responds."""
-        httpx_mock.add_response(
+        mock_acled_with_token.add_response(
             url=re.compile(r".*api\.acleddata\.com/acled/read.*"),
             json={"status": 200, "success": True, "count": 0, "data": []},
             status_code=200,
@@ -301,13 +316,15 @@ class TestACLEDAdapter:
         await adapter.close()
 
     @pytest.mark.asyncio
-    async def test_health_check_failure_invalid_key(
+    async def test_health_check_failure_invalid_credentials(
         self, httpx_mock, mock_acled_credentials
     ) -> None:
-        """Test health check returns False when API key is invalid."""
+        """Test health check returns False when credentials are invalid."""
+        # Mock token endpoint with auth error
         httpx_mock.add_response(
-            url=re.compile(r".*api\.acleddata\.com/acled/read.*"),
+            url=re.compile(r".*acleddata\.com/oauth/token.*"),
             status_code=401,
+            json={"error": "invalid_grant"},
         )
 
         adapter = ACLEDAdapter()
@@ -321,6 +338,11 @@ class TestACLEDAdapter:
         self, httpx_mock, mock_acled_credentials
     ) -> None:
         """Test health check returns False when API fails."""
+        # Mock successful token but failed API call
+        httpx_mock.add_response(
+            url=re.compile(r".*acleddata\.com/oauth/token.*"),
+            json={"access_token": "test", "expires_in": 86400},
+        )
         httpx_mock.add_exception(
             httpx.ConnectError("Connection refused"),
             url=re.compile(r".*api\.acleddata\.com/acled/read.*"),
@@ -334,7 +356,7 @@ class TestACLEDAdapter:
 
     @pytest.mark.asyncio
     @pytest.mark.httpx_mock(can_send_already_matched_responses=True)
-    async def test_cache_hit(self, httpx_mock, mock_acled_credentials, tmp_path) -> None:
+    async def test_cache_hit(self, mock_acled_with_token, tmp_path) -> None:
         """Test that cached results are returned without making HTTP request."""
         from ignifer.cache import CacheManager, MemoryCache, SQLiteCache
 
@@ -343,7 +365,7 @@ class TestACLEDAdapter:
         cache = CacheManager(l1=MemoryCache(), l2=SQLiteCache(db_path=db_path))
 
         # First request - will hit API
-        httpx_mock.add_response(
+        mock_acled_with_token.add_response(
             url=re.compile(r".*api\.acleddata\.com/acled/read.*"),
             json=load_fixture("acled_events.json"),
         )
@@ -353,9 +375,9 @@ class TestACLEDAdapter:
 
         assert result1.status == ResultStatus.SUCCESS
 
-        # Verify that only one request was made to the API
-        requests_made = len(httpx_mock.get_requests())
-        assert requests_made == 1, "First query should have made exactly one HTTP request"
+        # Verify that requests were made (token + API)
+        requests_made = len(mock_acled_with_token.get_requests())
+        assert requests_made == 2, "First query should have made token + API request"
 
         # Second request - should hit cache, not API
         result2 = await adapter.get_events("Burkina Faso")
@@ -363,17 +385,15 @@ class TestACLEDAdapter:
         assert result2.status == ResultStatus.SUCCESS
 
         # Verify no additional HTTP requests were made (cache hit)
-        assert len(httpx_mock.get_requests()) == 1, "Second query should not have made an HTTP request (cache hit)"
+        assert len(mock_acled_with_token.get_requests()) == 2, "Second query should not have made an HTTP request (cache hit)"
 
         await adapter.close()
         await cache.close()
 
     @pytest.mark.asyncio
-    async def test_results_include_event_types(
-        self, httpx_mock, mock_acled_credentials
-    ) -> None:
+    async def test_results_include_event_types(self, mock_acled_with_token) -> None:
         """Test that response includes event type breakdown."""
-        httpx_mock.add_response(
+        mock_acled_with_token.add_response(
             url=re.compile(r".*api\.acleddata\.com/acled/read.*"),
             json=load_fixture("acled_events.json"),
         )
@@ -395,11 +415,9 @@ class TestACLEDAdapter:
         await adapter.close()
 
     @pytest.mark.asyncio
-    async def test_results_include_actors(
-        self, httpx_mock, mock_acled_credentials
-    ) -> None:
+    async def test_results_include_actors(self, mock_acled_with_token) -> None:
         """Test that response includes actor information."""
-        httpx_mock.add_response(
+        mock_acled_with_token.add_response(
             url=re.compile(r".*api\.acleddata\.com/acled/read.*"),
             json=load_fixture("acled_events.json"),
         )
@@ -419,11 +437,9 @@ class TestACLEDAdapter:
         await adapter.close()
 
     @pytest.mark.asyncio
-    async def test_results_include_fatalities(
-        self, httpx_mock, mock_acled_credentials
-    ) -> None:
+    async def test_results_include_fatalities(self, mock_acled_with_token) -> None:
         """Test that response includes fatality counts."""
-        httpx_mock.add_response(
+        mock_acled_with_token.add_response(
             url=re.compile(r".*api\.acleddata\.com/acled/read.*"),
             json=load_fixture("acled_events.json"),
         )
@@ -443,10 +459,10 @@ class TestACLEDAdapter:
 
     @pytest.mark.asyncio
     async def test_results_include_geographic_distribution(
-        self, httpx_mock, mock_acled_credentials
+        self, mock_acled_with_token
     ) -> None:
         """Test that response includes geographic distribution."""
-        httpx_mock.add_response(
+        mock_acled_with_token.add_response(
             url=re.compile(r".*api\.acleddata\.com/acled/read.*"),
             json=load_fixture("acled_events.json"),
         )
@@ -478,11 +494,9 @@ class TestACLEDAdapter:
         assert adapter._client is None
 
     @pytest.mark.asyncio
-    async def test_close_client_after_use(
-        self, httpx_mock, mock_acled_credentials
-    ) -> None:
+    async def test_close_client_after_use(self, mock_acled_with_token) -> None:
         """Test that close() properly cleans up HTTP client after use."""
-        httpx_mock.add_response(
+        mock_acled_with_token.add_response(
             url=re.compile(r".*api\.acleddata\.com/acled/read.*"),
             json=load_fixture("acled_events.json"),
         )
@@ -499,11 +513,9 @@ class TestACLEDAdapter:
 
     @pytest.mark.asyncio
     @pytest.mark.httpx_mock(can_send_already_matched_responses=True)
-    async def test_date_range_parsing_last_days(
-        self, httpx_mock, mock_acled_credentials
-    ) -> None:
+    async def test_date_range_parsing_last_days(self, mock_acled_with_token) -> None:
         """Test parsing 'last N days' format."""
-        httpx_mock.add_response(
+        mock_acled_with_token.add_response(
             url=re.compile(r".*api\.acleddata\.com/acled/read.*"),
             json=load_fixture("acled_events.json"),
         )
@@ -514,18 +526,16 @@ class TestACLEDAdapter:
         assert result.status == ResultStatus.SUCCESS
 
         # Verify request included date parameters (may have multiple due to trend comparison)
-        requests = httpx_mock.get_requests()
+        requests = mock_acled_with_token.get_requests()
         assert any("event_date" in str(req.url) for req in requests)
 
         await adapter.close()
 
     @pytest.mark.asyncio
     @pytest.mark.httpx_mock(can_send_already_matched_responses=True)
-    async def test_date_range_parsing_last_weeks(
-        self, httpx_mock, mock_acled_credentials
-    ) -> None:
+    async def test_date_range_parsing_last_weeks(self, mock_acled_with_token) -> None:
         """Test parsing 'last N weeks' format."""
-        httpx_mock.add_response(
+        mock_acled_with_token.add_response(
             url=re.compile(r".*api\.acleddata\.com/acled/read.*"),
             json=load_fixture("acled_events.json"),
         )
@@ -536,17 +546,15 @@ class TestACLEDAdapter:
         assert result.status == ResultStatus.SUCCESS
 
         # Verify request included date parameters (may have multiple due to trend comparison)
-        requests = httpx_mock.get_requests()
+        requests = mock_acled_with_token.get_requests()
         assert any("event_date" in str(req.url) for req in requests)
 
         await adapter.close()
 
     @pytest.mark.asyncio
-    async def test_api_error_response(
-        self, httpx_mock, mock_acled_credentials
-    ) -> None:
+    async def test_api_error_response(self, mock_acled_with_token) -> None:
         """Test handling of API-level error response."""
-        httpx_mock.add_response(
+        mock_acled_with_token.add_response(
             url=re.compile(r".*api\.acleddata\.com/acled/read.*"),
             json={"status": 400, "success": False, "error": "Invalid country"},
             status_code=200,  # API returns 200 with error in body
@@ -562,11 +570,9 @@ class TestACLEDAdapter:
         await adapter.close()
 
     @pytest.mark.asyncio
-    async def test_normalized_events_in_results(
-        self, httpx_mock, mock_acled_credentials
-    ) -> None:
+    async def test_normalized_events_in_results(self, mock_acled_with_token) -> None:
         """Test that individual events are normalized and included in results."""
-        httpx_mock.add_response(
+        mock_acled_with_token.add_response(
             url=re.compile(r".*api\.acleddata\.com/acled/read.*"),
             json=load_fixture("acled_events.json"),
         )
@@ -592,16 +598,16 @@ class TestACLEDAdapter:
     @pytest.mark.asyncio
     @pytest.mark.httpx_mock(can_send_already_matched_responses=True)
     async def test_trend_comparison_with_date_range(
-        self, httpx_mock, mock_acled_credentials
+        self, mock_acled_with_token
     ) -> None:
         """Test that trend comparison is calculated when date range is specified."""
         # Mock current period response
-        httpx_mock.add_response(
+        mock_acled_with_token.add_response(
             url=re.compile(r".*api\.acleddata\.com/acled/read.*"),
             json=load_fixture("acled_events.json"),
         )
         # Mock previous period response (for trend comparison)
-        httpx_mock.add_response(
+        mock_acled_with_token.add_response(
             url=re.compile(r".*api\.acleddata\.com/acled/read.*"),
             json={
                 "status": 200,
@@ -634,10 +640,10 @@ class TestACLEDAdapter:
 
     @pytest.mark.asyncio
     async def test_trend_comparison_not_included_without_date_range(
-        self, httpx_mock, mock_acled_credentials
+        self, mock_acled_with_token
     ) -> None:
         """Test that trend comparison is not included when no date range is specified."""
-        httpx_mock.add_response(
+        mock_acled_with_token.add_response(
             url=re.compile(r".*api\.acleddata\.com/acled/read.*"),
             json=load_fixture("acled_events.json"),
         )
@@ -657,16 +663,16 @@ class TestACLEDAdapter:
     @pytest.mark.asyncio
     @pytest.mark.httpx_mock(can_send_already_matched_responses=True)
     async def test_trend_comparison_fails_gracefully(
-        self, httpx_mock, mock_acled_credentials
+        self, mock_acled_with_token
     ) -> None:
         """Test that trend comparison failure doesn't break the main query."""
         # Mock current period response
-        httpx_mock.add_response(
+        mock_acled_with_token.add_response(
             url=re.compile(r".*api\.acleddata\.com/acled/read.*"),
             json=load_fixture("acled_events.json"),
         )
         # Mock previous period response with error
-        httpx_mock.add_response(
+        mock_acled_with_token.add_response(
             url=re.compile(r".*api\.acleddata\.com/acled/read.*"),
             status_code=500,
         )
@@ -685,11 +691,9 @@ class TestACLEDAdapter:
         await adapter.close()
 
     @pytest.mark.asyncio
-    async def test_api_request_includes_email(
-        self, httpx_mock, mock_acled_credentials
-    ) -> None:
-        """Test that API requests include email parameter."""
-        httpx_mock.add_response(
+    async def test_api_request_uses_bearer_token(self, mock_acled_with_token) -> None:
+        """Test that API requests use Bearer token authentication."""
+        mock_acled_with_token.add_response(
             url=re.compile(r".*api\.acleddata\.com/acled/read.*"),
             json=load_fixture("acled_events.json"),
         )
@@ -697,9 +701,17 @@ class TestACLEDAdapter:
         adapter = ACLEDAdapter()
         await adapter.get_events("Burkina Faso")
 
-        # Verify request included email parameter
-        request = httpx_mock.get_request()
-        assert "email" in str(request.url)
-        assert "test%40example.com" in str(request.url) or "test@example.com" in str(request.url)
+        # Find the API request (not the token request)
+        requests = mock_acled_with_token.get_requests()
+        api_request = next(r for r in requests if "acleddata.com/acled/read" in str(r.url))
+
+        # Verify Authorization header is present with Bearer token
+        assert "authorization" in [h.lower() for h in api_request.headers.keys()]
+        auth_header = api_request.headers.get("authorization", "")
+        assert auth_header.startswith("Bearer ")
+
+        # Verify credentials are NOT in the URL (no key or email in query params)
+        assert "key=" not in str(api_request.url)
+        assert "email=" not in str(api_request.url)
 
         await adapter.close()

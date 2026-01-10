@@ -4,6 +4,11 @@ ACLED (Armed Conflict Location & Event Data) provides comprehensive
 conflict event data compiled from reports and local sources.
 
 API Reference: https://acleddata.com/resources/api-documentation/
+
+Authentication:
+    ACLED uses OAuth2 password grant flow. Users authenticate with their
+    email and password to obtain time-limited access tokens.
+    See: https://acleddata.com/api-documentation/getting-started
 """
 
 import logging
@@ -14,6 +19,9 @@ from typing import Any
 from urllib.parse import urlencode
 
 import httpx
+
+# OAuth2 token endpoint
+ACLED_TOKEN_URL = "https://acleddata.com/oauth/token"
 
 from ignifer.adapters.base import AdapterAuthError, AdapterParseError, AdapterTimeoutError
 from ignifer.cache import CacheManager, cache_key
@@ -42,7 +50,11 @@ class ACLEDAdapter:
 
     Provides access to conflict event data including battles, violence
     against civilians, protests, and strategic developments.
-    Requires API key registration at https://acleddata.com/register/
+    Requires registration at https://acleddata.com/register/
+
+    Authentication uses OAuth2 password grant flow:
+    - Tokens are valid for 24 hours
+    - Refresh tokens are valid for 14 days
 
     Attributes:
         source_name: "acled"
@@ -52,6 +64,7 @@ class ACLEDAdapter:
     BASE_URL = "https://api.acleddata.com/acled/read"
     DEFAULT_TIMEOUT = 15.0  # seconds
     DEFAULT_LIMIT = 500  # Default number of events to fetch
+    TOKEN_REFRESH_MARGIN = 300  # Refresh token 5 minutes before expiry
 
     def __init__(self, cache: CacheManager | None = None) -> None:
         """Initialize the ACLED adapter.
@@ -61,6 +74,9 @@ class ACLEDAdapter:
         """
         self._client: httpx.AsyncClient | None = None
         self._cache = cache
+        # OAuth2 token management
+        self._access_token: str | None = None
+        self._token_expires_at: datetime | None = None
 
     @property
     def source_name(self) -> str:
@@ -73,18 +89,87 @@ class ACLEDAdapter:
         return QualityTier.HIGH
 
     def _get_credentials(self) -> tuple[str, str] | None:
-        """Get API key and email from settings.
+        """Get email and password from settings.
 
         Returns:
-            Tuple of (api_key, email), or None if not configured.
+            Tuple of (email, password), or None if not configured.
         """
         settings = get_settings()
         if not settings.has_acled_credentials():
             return None
         return (
-            settings.acled_key.get_secret_value(),  # type: ignore[union-attr]
             settings.acled_email.get_secret_value(),  # type: ignore[union-attr]
+            settings.acled_password.get_secret_value(),  # type: ignore[union-attr]
         )
+
+    async def _get_access_token(self) -> str:
+        """Get a valid OAuth2 access token, refreshing if necessary.
+
+        Uses the OAuth2 password grant flow to obtain tokens.
+
+        Returns:
+            Valid access token string.
+
+        Raises:
+            AdapterAuthError: If authentication fails or credentials are missing.
+        """
+        # Check if we have a valid cached token
+        if self._access_token and self._token_expires_at:
+            now = datetime.now(timezone.utc)
+            if now < self._token_expires_at - timedelta(seconds=self.TOKEN_REFRESH_MARGIN):
+                return self._access_token
+
+        # Get credentials
+        credentials = self._get_credentials()
+        if credentials is None:
+            raise AdapterAuthError(
+                self.source_name,
+                "ACLED credentials not configured"
+            )
+        email, password = credentials
+
+        # Request new token using password grant
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(10.0)) as token_client:
+                response = await token_client.post(
+                    ACLED_TOKEN_URL,
+                    data={
+                        "grant_type": "password",
+                        "username": email,
+                        "password": password,
+                        "client_id": "acled",
+                    },
+                    headers={"Content-Type": "application/x-www-form-urlencoded"},
+                )
+
+                if response.status_code != 200:
+                    error_detail = "Invalid credentials or token request failed"
+                    try:
+                        error_data = response.json()
+                        if "error_description" in error_data:
+                            error_detail = error_data["error_description"]
+                        elif "error" in error_data:
+                            error_detail = error_data["error"]
+                    except Exception:
+                        pass
+                    raise AdapterAuthError(self.source_name, error_detail)
+
+                token_data = response.json()
+                self._access_token = token_data["access_token"]
+
+                # Token expires_in is in seconds (typically 24 hours = 86400)
+                expires_in = token_data.get("expires_in", 86400)
+                self._token_expires_at = datetime.now(timezone.utc) + timedelta(
+                    seconds=expires_in
+                )
+
+                logger.debug(f"ACLED token obtained, expires in {expires_in}s")
+                return self._access_token
+
+        except httpx.HTTPError as e:
+            raise AdapterAuthError(
+                self.source_name, f"Token request failed: {e}"
+            ) from e
 
     async def _get_client(self) -> httpx.AsyncClient:
         """Lazy initialization of HTTP client."""
@@ -191,24 +276,20 @@ class ACLEDAdapter:
         self,
         country: str,
         date_range: str,
-        api_key: str,
-        api_email: str,
+        access_token: str,
     ) -> list[dict[str, Any]] | None:
         """Fetch raw events for a specific period (for trend comparison).
 
         Args:
             country: Country name.
             date_range: Date range in YYYY-MM-DD|YYYY-MM-DD format.
-            api_key: ACLED API key.
-            api_email: ACLED API email.
+            access_token: OAuth2 access token.
 
         Returns:
             List of events, or None if request fails.
         """
         try:
             query_params: dict[str, str | int] = {
-                "key": api_key,
-                "email": api_email,
                 "country": country,
                 "limit": self.DEFAULT_LIMIT,
                 "event_date": date_range,
@@ -217,7 +298,10 @@ class ACLEDAdapter:
             url = f"{self.BASE_URL}?{urlencode(query_params)}"
 
             client = await self._get_client()
-            response = await client.get(url)
+            response = await client.get(
+                url,
+                headers={"Authorization": f"Bearer {access_token}"},
+            )
 
             if response.status_code != 200:
                 return None
@@ -428,7 +512,12 @@ class ACLEDAdapter:
                 retrieved_at=datetime.now(timezone.utc),
                 error=settings.get_credential_error_message("acled"),
             )
-        api_key, api_email = credentials
+
+        # Get OAuth2 access token
+        try:
+            access_token = await self._get_access_token()
+        except AdapterAuthError:
+            raise
 
         # Parse date range if natural language
         date_range_start: str | None = None
@@ -462,10 +551,8 @@ class ACLEDAdapter:
                 logger.debug(f"Cache hit for {key}")
                 return self._build_result_from_cache(country, cached.data)
 
-        # Build request URL
+        # Build request URL (no credentials in query params - use Bearer token)
         query_params: dict[str, str | int] = {
-            "key": api_key,
-            "email": api_email,
             "country": country,
             "limit": self.DEFAULT_LIMIT,
         }
@@ -480,11 +567,14 @@ class ACLEDAdapter:
         logger.info(f"Querying ACLED for country: {country}")
 
         try:
-            response = await client.get(url)
+            response = await client.get(
+                url,
+                headers={"Authorization": f"Bearer {access_token}"},
+            )
 
             # Handle authentication errors
             if response.status_code in (401, 403):
-                raise AdapterAuthError(self.source_name, "Invalid API key")
+                raise AdapterAuthError(self.source_name, "Invalid or expired token")
 
             # Handle rate limiting
             if response.status_code == 429:
@@ -505,7 +595,7 @@ class ACLEDAdapter:
 
         except httpx.HTTPStatusError as e:
             if e.response.status_code in (401, 403):
-                raise AdapterAuthError(self.source_name, "Invalid API key") from e
+                raise AdapterAuthError(self.source_name, "Invalid or expired token") from e
             if e.response.status_code == 429:
                 return OSINTResult(
                     status=ResultStatus.RATE_LIMITED,
@@ -560,7 +650,7 @@ class ACLEDAdapter:
                 prev_start, prev_end = previous_period
                 prev_date_range = f"{prev_start}|{prev_end}"
                 prev_events = await self._fetch_events_for_period(
-                    country, prev_date_range, api_key, api_email
+                    country, prev_date_range, access_token
                 )
                 if prev_events is not None:
                     # Calculate stats for both periods
@@ -656,24 +746,31 @@ class ACLEDAdapter:
         try:
             credentials = self._get_credentials()
             if credentials is None:
-                logger.warning("ACLED health check failed: No API credentials configured")
+                logger.warning("ACLED health check failed: No credentials configured")
                 return False
 
-            api_key, api_email = credentials
+            # Try to get an OAuth2 token - this validates credentials
+            try:
+                access_token = await self._get_access_token()
+            except AdapterAuthError as e:
+                logger.warning(f"ACLED health check failed: {e}")
+                return False
+
             client = await self._get_client()
             # Make a minimal query to test connectivity
             query_params = {
-                "key": api_key,
-                "email": api_email,
                 "limit": 1,
                 "country": "Norway",  # Use a country with typically few events
             }
             url = f"{self.BASE_URL}?{urlencode(query_params)}"
 
-            response = await client.get(url)
+            response = await client.get(
+                url,
+                headers={"Authorization": f"Bearer {access_token}"},
+            )
 
             if response.status_code in (401, 403):
-                logger.warning("ACLED health check failed: Invalid API key")
+                logger.warning("ACLED health check failed: Invalid or expired token")
                 return False
 
             return response.status_code == 200

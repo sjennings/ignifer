@@ -1056,3 +1056,85 @@ class TestLogging:
             )
 
         assert any("complete" in record.message.lower() for record in caplog.records)
+
+
+class TestGDELTArticleHandling:
+    """Tests for GDELT news article handling.
+
+    GDELT returns multiple news articles that should each be treated
+    as unique findings, not grouped together.
+    """
+
+    @pytest.mark.asyncio
+    async def test_gdelt_articles_create_unique_findings(self) -> None:
+        """Each GDELT article should be a unique finding."""
+        # Create mock GDELT adapter with multiple articles
+        articles = [
+            {"title": "Iran protests spread", "url": "https://news1.test/article1"},
+            {"title": "Iran gas prices rise", "url": "https://news2.test/article2"},
+            {"title": "Iran situation worsens", "url": "https://news3.test/article3"},
+        ]
+        adapter = make_mock_adapter("gdelt", QualityTier.MEDIUM, articles)
+        correlator = Correlator(adapters={"gdelt": adapter})
+
+        result = await correlator.aggregate("Iran protests", sources=["gdelt"])
+
+        # Should have 3 separate findings, not 1 grouped finding
+        assert len(result.findings) == 3
+
+        # Each finding should have its unique content
+        contents = [f.content for f in result.findings]
+        assert "Iran protests spread" in contents
+        assert "Iran gas prices rise" in contents
+        assert "Iran situation worsens" in contents
+
+    @pytest.mark.asyncio
+    async def test_gdelt_articles_have_unique_topics(self) -> None:
+        """Each GDELT article should have a unique topic (not all 'gdelt')."""
+        articles = [
+            {"title": "Article 1", "url": "https://news1.test/a"},
+            {"title": "Article 2", "url": "https://news2.test/b"},
+        ]
+        adapter = make_mock_adapter("gdelt", QualityTier.MEDIUM, articles)
+        correlator = Correlator(adapters={"gdelt": adapter})
+
+        result = await correlator.aggregate("Test", sources=["gdelt"])
+
+        # Topics should be unique (based on URL hash)
+        topics = [f.topic for f in result.findings]
+        assert len(set(topics)) == 2  # 2 unique topics
+
+        # Topics should start with news_article_ prefix
+        for topic in topics:
+            assert topic.startswith("news_article_")
+
+    @pytest.mark.asyncio
+    async def test_gdelt_articles_marked_single_source(self) -> None:
+        """GDELT articles should be marked as single source (no cross-corroboration)."""
+        articles = [
+            {"title": "News story", "url": "https://news.test/story"},
+        ]
+        adapter = make_mock_adapter("gdelt", QualityTier.MEDIUM, articles)
+        correlator = Correlator(adapters={"gdelt": adapter})
+
+        result = await correlator.aggregate("Test", sources=["gdelt"])
+
+        assert len(result.findings) == 1
+        assert result.findings[0].status == CorroborationStatus.SINGLE_SOURCE
+
+    @pytest.mark.asyncio
+    async def test_gdelt_article_without_url_uses_title_hash(self) -> None:
+        """GDELT articles without URL should use title hash for unique topic."""
+        articles = [
+            {"title": "Unique Title 1"},  # No URL
+            {"title": "Unique Title 2"},  # No URL
+        ]
+        adapter = make_mock_adapter("gdelt", QualityTier.MEDIUM, articles)
+        correlator = Correlator(adapters={"gdelt": adapter})
+
+        result = await correlator.aggregate("Test", sources=["gdelt"])
+
+        # Should still have 2 unique findings
+        assert len(result.findings) == 2
+        topics = [f.topic for f in result.findings]
+        assert len(set(topics)) == 2  # Unique topics even without URLs

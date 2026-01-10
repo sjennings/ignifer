@@ -3612,7 +3612,7 @@ def _format_deep_dive_footer(confidence_level: str) -> str:
     return footer
 
 
-def _format_deep_dive_output(
+async def _format_deep_dive_output(
     topic: str,
     result: AggregatedResult,
     unavailable_sources: list[tuple[str, str]],
@@ -3658,6 +3658,9 @@ def _format_deep_dive_output(
     }
 
     # Output findings grouped by source
+    # Limit news articles to avoid overwhelming output
+    max_news_articles = 15
+
     source_order = [
         "gdelt",
         "worldbank",
@@ -3675,14 +3678,85 @@ def _format_deep_dive_output(
                 section_title = f"** {section_title} (FOCUS) **"
             output += f"\n### {section_title}\n"
             output += f"[Source: {source_name.upper()}]\n"
-            for finding in findings_by_source[source_name]:
-                output += f"- {finding.content}\n"
-                if finding.corroboration_note:
-                    output += f"  {finding.corroboration_note}\n"
+
+            source_findings = findings_by_source[source_name]
+            # Limit news articles to avoid overwhelming output
+            if source_name == "gdelt" and len(source_findings) > max_news_articles:
+                output += f"*Showing {max_news_articles} of {len(source_findings)} articles*\n"
+                source_findings = source_findings[:max_news_articles]
+
+            for finding in source_findings:
+                # Rich formatting for GDELT news articles
+                if source_name == "gdelt" and finding.sources:
+                    article_data = finding.sources[0].data
+                    title = finding.content
+                    url = article_data.get("url", "")
+                    domain = article_data.get("domain", "")
+                    language = article_data.get("language", "")
+                    seendate = article_data.get("seendate", "")
+
+                    # Format date if available (e.g., "20251213T091500Z" -> "2025-12-13")
+                    date_str = ""
+                    if seendate and len(seendate) >= 8:
+                        date_str = f"{seendate[:4]}-{seendate[4:6]}-{seendate[6:8]}"
+
+                    # Build rich article entry
+                    is_non_english = language and language.lower() != "english"
+                    lang_tag = f" [{language}]" if is_non_english else ""
+                    output += f"\n**{title}**{lang_tag}\n"
+                    if domain:
+                        output += f"  Source: {domain}"
+                        if date_str:
+                            output += f" ({date_str})"
+                        output += "\n"
+                    if url:
+                        output += f"  URL: {url}\n"
+                else:
+                    # Standard formatting for other sources
+                    output += f"- {finding.content}\n"
+                    if finding.corroboration_note:
+                        output += f"  {finding.corroboration_note}\n"
 
     # If no findings, note that
     if not result.findings:
         output += "\nNo findings retrieved from available sources.\n"
+
+    # Extract full article content for GDELT findings
+    if "gdelt" in findings_by_source and findings_by_source["gdelt"]:
+        gdelt_findings = findings_by_source["gdelt"]
+        # Build article list from finding data for extraction
+        articles_to_extract = []
+        for finding in gdelt_findings[:5]:  # Extract up to 5 articles
+            if finding.sources:
+                article_data = finding.sources[0].data
+                if article_data.get("url"):
+                    articles_to_extract.append(article_data)
+
+        if articles_to_extract:
+            logger.info(f"Extracting {len(articles_to_extract)} articles for deep dive...")
+            extracts = await _auto_extract_articles(articles_to_extract, max_count=5)
+
+            if extracts:
+                output += "\n" + "=" * 55 + "\n"
+                output += f"{'PRIMARY SOURCE EXTRACTS':^55}\n"
+                output += "=" * 55 + "\n\n"
+
+                for i, ext in enumerate(extracts, 1):
+                    lang_val = ext.get("language", "")
+                    lang = str(lang_val) if lang_val else ""
+                    is_non_english = lang and lang.lower() != "english"
+                    lang_tag = f" [{lang.upper()}]" if is_non_english else ""
+                    output += f"### ARTICLE {i}{lang_tag}: {ext['title']}\n"
+                    output += f"**Source:** {ext['domain']}\n"
+                    output += f"**URL:** {ext['url']}\n\n"
+
+                    content = ext.get("content")
+                    if content:
+                        output += content + "\n"
+                    else:
+                        output += f"*[Extraction failed: {ext.get('error', 'Unknown error')}]*\n"
+
+                    output += "\n" + "-" * 55 + "\n\n"
 
     # Corroboration analysis
     output += _format_corroboration_section(result.findings)
@@ -3857,7 +3931,7 @@ async def deep_dive(
         result = await correlator.aggregate(topic_cleaned, sources_to_query)
 
         # Format and return output
-        output = _format_deep_dive_output(
+        output = await _format_deep_dive_output(
             topic_cleaned,
             result,
             unavailable_sources,

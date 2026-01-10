@@ -10,6 +10,7 @@ Implements:
 """
 
 import asyncio
+import hashlib
 import logging
 from datetime import datetime
 from enum import Enum
@@ -325,10 +326,31 @@ class Correlator:
 
         Different sources have different field structures.
         Returns (topic, content) tuple.
+
+        Special handling:
+        - GDELT: Each article is a unique finding (topic = "news_article_<hash>")
+        - Other sources: Group by topic/category fields for corroboration
         """
         # Try common field patterns
         topic = ""
         content = ""
+
+        # Special handling for news sources (GDELT)
+        # Each article should be its own finding, not grouped together
+        if source_name == "gdelt":
+            # Use title as content
+            content = str(item.get("title", ""))
+            # Create unique topic per article using URL hash
+            url = item.get("url", "")
+            if url:
+                # Use URL hash to make each article unique
+                url_hash = hashlib.md5(url.encode()).hexdigest()[:8]
+                topic = f"news_article_{url_hash}"
+            else:
+                # Fallback to title hash if no URL
+                title_hash = hashlib.md5(content.encode()).hexdigest()[:8]
+                topic = f"news_article_{title_hash}"
+            return topic, content
 
         # Topic extraction - try various field names
         topic_fields = ["topic", "category", "type", "event_type", "indicator"]

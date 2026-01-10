@@ -176,7 +176,7 @@ track_flight(identifier: str, rigor: bool | None = None) -> str
 
 **Returns:** Current position, altitude, heading, speed, and 24-hour track history.
 
-**Note:** Requires OpenSky credentials. Set `IGNIFER_OPENSKY_USERNAME` and `IGNIFER_OPENSKY_PASSWORD` environment variables.
+**Note:** Requires OpenSky OAuth2 credentials. Set `IGNIFER_OPENSKY_CLIENT_ID` and `IGNIFER_OPENSKY_CLIENT_SECRET` environment variables. Create API credentials at https://opensky-network.org/account
 
 ---
 
@@ -211,7 +211,7 @@ conflict_analysis(region: str, time_range: str | None = None, rigor: bool | None
 
 **Returns:** Conflict event summary with event types, actors, fatalities, and geographic distribution.
 
-**Note:** Requires ACLED API key. Set `IGNIFER_ACLED_KEY` and `IGNIFER_ACLED_EMAIL` environment variables.
+**Note:** Requires ACLED account. Set `IGNIFER_ACLED_EMAIL` and `IGNIFER_ACLED_PASSWORD` environment variables. Register for free access at https://acleddata.com/register/
 
 ---
 
@@ -364,16 +364,16 @@ Or if installed globally:
 For sources requiring authentication, set environment variables:
 
 ```bash
-# OpenSky (Aviation Tracking)
-export IGNIFER_OPENSKY_USERNAME="your_username"
-export IGNIFER_OPENSKY_PASSWORD="your_password"
+# OpenSky (Aviation Tracking - OAuth2)
+export IGNIFER_OPENSKY_CLIENT_ID="your_client_id"
+export IGNIFER_OPENSKY_CLIENT_SECRET="your_client_secret"
 
 # AISStream (Maritime Tracking)
 export IGNIFER_AISSTREAM_KEY="your_api_key"
 
-# ACLED (Conflict Data)
-export IGNIFER_ACLED_KEY="your_api_key"
+# ACLED (Conflict Data - OAuth2)
 export IGNIFER_ACLED_EMAIL="your_email"
+export IGNIFER_ACLED_PASSWORD="your_password"
 
 # Rigor Mode (Optional - enables IC-standard output globally)
 export IGNIFER_RIGOR_MODE=true
@@ -384,16 +384,16 @@ Alternatively, create a config file at `~/.config/ignifer/config.toml`:
 ```toml
 rigor_mode = true  # Optional: enable rigor mode globally
 
-[opensky]
-username = "your_username"
-password = "your_password"
+# OpenSky OAuth2 credentials
+opensky_client_id = "your_client_id"
+opensky_client_secret = "your_client_secret"
 
-[aisstream]
-api_key = "your_api_key"
+# AISStream API key
+aisstream_key = "your_api_key"
 
-[acled]
-api_key = "your_api_key"
-email = "your_email"
+# ACLED OAuth2 credentials
+acled_email = "your_email"
+acled_password = "your_password"
 ```
 
 ## Architecture

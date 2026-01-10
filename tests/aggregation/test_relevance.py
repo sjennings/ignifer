@@ -152,11 +152,11 @@ def engine() -> SourceRelevanceEngine:
 @pytest.fixture
 def engine_with_all_credentials(monkeypatch: pytest.MonkeyPatch) -> SourceRelevanceEngine:
     """Create engine with all credentials configured."""
-    monkeypatch.setenv("IGNIFER_OPENSKY_USERNAME", "test")
-    monkeypatch.setenv("IGNIFER_OPENSKY_PASSWORD", "test")
+    monkeypatch.setenv("IGNIFER_OPENSKY_CLIENT_ID", "test")
+    monkeypatch.setenv("IGNIFER_OPENSKY_CLIENT_SECRET", "test")
     monkeypatch.setenv("IGNIFER_AISSTREAM_KEY", "test")
-    monkeypatch.setenv("IGNIFER_ACLED_KEY", "test")
     monkeypatch.setenv("IGNIFER_ACLED_EMAIL", "test@test.com")
+    monkeypatch.setenv("IGNIFER_ACLED_PASSWORD", "test")
     reset_settings()
     engine = SourceRelevanceEngine()
     yield engine
@@ -167,11 +167,11 @@ def engine_with_all_credentials(monkeypatch: pytest.MonkeyPatch) -> SourceReleva
 def engine_no_credentials(monkeypatch: pytest.MonkeyPatch) -> SourceRelevanceEngine:
     """Create engine with no optional credentials configured."""
     # Clear any existing credentials
-    monkeypatch.delenv("IGNIFER_OPENSKY_USERNAME", raising=False)
-    monkeypatch.delenv("IGNIFER_OPENSKY_PASSWORD", raising=False)
+    monkeypatch.delenv("IGNIFER_OPENSKY_CLIENT_ID", raising=False)
+    monkeypatch.delenv("IGNIFER_OPENSKY_CLIENT_SECRET", raising=False)
     monkeypatch.delenv("IGNIFER_AISSTREAM_KEY", raising=False)
-    monkeypatch.delenv("IGNIFER_ACLED_KEY", raising=False)
     monkeypatch.delenv("IGNIFER_ACLED_EMAIL", raising=False)
+    monkeypatch.delenv("IGNIFER_ACLED_PASSWORD", raising=False)
     reset_settings()
     engine = SourceRelevanceEngine()
     yield engine

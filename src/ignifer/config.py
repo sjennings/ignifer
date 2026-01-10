@@ -26,14 +26,15 @@ CONFIG_FILE_PATH = Path.home() / ".config" / "ignifer" / "config.toml"
 # Error messages for missing credentials
 _CREDENTIAL_ERROR_MESSAGES: dict[str, str] = {
     "opensky": (
-        "OpenSky requires authentication. "
-        "Set IGNIFER_OPENSKY_USERNAME and IGNIFER_OPENSKY_PASSWORD environment variables, "
-        "or configure them in ~/.config/ignifer/config.toml"
+        "OpenSky requires OAuth2 authentication. "
+        "Set IGNIFER_OPENSKY_CLIENT_ID and IGNIFER_OPENSKY_CLIENT_SECRET environment variables, "
+        "or configure opensky_client_id and opensky_client_secret in ~/.config/ignifer/config.toml. "
+        "Create API credentials at https://opensky-network.org/account"
     ),
     "acled": (
-        "ACLED requires an API key and email for authentication. "
-        "Set IGNIFER_ACLED_KEY and IGNIFER_ACLED_EMAIL environment variables, "
-        "or configure acled_key and acled_email in ~/.config/ignifer/config.toml. "
+        "ACLED requires OAuth2 authentication with email and password. "
+        "Set IGNIFER_ACLED_EMAIL and IGNIFER_ACLED_PASSWORD environment variables, "
+        "or configure acled_email and acled_password in ~/.config/ignifer/config.toml. "
         "Register for free access at https://acleddata.com/register/"
     ),
     "aisstream": (
@@ -92,11 +93,13 @@ class Settings(BaseSettings):
 
     # API Keys (Phase 2+) - NEVER log these
     # Stored as SecretStr for security
-    opensky_username: SecretStr | None = None
-    opensky_password: SecretStr | None = None
+    # OpenSky OAuth2 credentials (recommended)
+    opensky_client_id: SecretStr | None = None
+    opensky_client_secret: SecretStr | None = None
     aisstream_key: SecretStr | None = None
-    acled_key: SecretStr | None = None
+    # ACLED OAuth2 credentials (email + password)
     acled_email: SecretStr | None = None
+    acled_password: SecretStr | None = None
 
     # Cache TTL defaults (seconds)
     ttl_gdelt: int = 900  # 15 minutes (news is time-sensitive)
@@ -125,11 +128,11 @@ class Settings(BaseSettings):
         # Map config file keys to settings fields
         # Config file uses same keys as settings fields
         config_keys = [
-            "opensky_username",
-            "opensky_password",
+            "opensky_client_id",
+            "opensky_client_secret",
             "aisstream_key",
-            "acled_key",
             "acled_email",
+            "acled_password",
             "ttl_gdelt",
             "ttl_opensky",
             "ttl_aisstream",
@@ -150,20 +153,20 @@ class Settings(BaseSettings):
         return values
 
     def has_opensky_credentials(self) -> bool:
-        """Check if OpenSky credentials are configured.
+        """Check if OpenSky OAuth2 credentials are configured.
 
         Returns:
-            True if both username and password are non-empty, False otherwise
+            True if both client_id and client_secret are non-empty, False otherwise
         """
-        return bool(self.opensky_username) and bool(self.opensky_password)
+        return bool(self.opensky_client_id) and bool(self.opensky_client_secret)
 
     def has_acled_credentials(self) -> bool:
-        """Check if ACLED API key and email are configured.
+        """Check if ACLED OAuth2 credentials are configured.
 
         Returns:
-            True if both ACLED key and email are non-empty, False otherwise
+            True if both ACLED email and password are non-empty, False otherwise
         """
-        return bool(self.acled_key) and bool(self.acled_email)
+        return bool(self.acled_email) and bool(self.acled_password)
 
     def has_aisstream_credentials(self) -> bool:
         """Check if AISStream API key is configured.
@@ -194,7 +197,7 @@ class Settings(BaseSettings):
         fields = []
         for name in type(self).model_fields:
             value = getattr(self, name)
-            if name in ("opensky_username", "opensky_password", "aisstream_key", "acled_key", "acled_email"):
+            if name in ("opensky_client_id", "opensky_client_secret", "aisstream_key", "acled_email", "acled_password"):
                 # Mask credentials - show only if set or not
                 if value is not None:
                     fields.append(f"{name}=SecretStr('**********')")
