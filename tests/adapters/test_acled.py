@@ -32,6 +32,8 @@ def mock_acled_credentials(monkeypatch):
     """Set mock ACLED OAuth2 credentials in environment."""
     monkeypatch.setenv("IGNIFER_ACLED_EMAIL", "test@example.com")
     monkeypatch.setenv("IGNIFER_ACLED_PASSWORD", "test_password_12345")
+    # Prevent loading credentials from config file
+    monkeypatch.setattr("ignifer.config._load_config_file", lambda *args, **kwargs: {})
     reset_settings()  # Force reload with new env vars
     yield
     reset_settings()
@@ -80,7 +82,7 @@ class TestACLEDAdapter:
     async def test_query_success(self, mock_acled_with_token) -> None:
         """Test successful query returns OSINTResult with SUCCESS status."""
         mock_acled_with_token.add_response(
-            url=re.compile(r".*api\.acleddata\.com/acled/read.*"),
+            url=re.compile(r".*acleddata\.com/api/acled/read.*"),
             json=load_fixture("acled_events.json"),
         )
 
@@ -99,7 +101,7 @@ class TestACLEDAdapter:
     async def test_query_with_date_range(self, mock_acled_with_token) -> None:
         """Test query with date range parameter works correctly."""
         mock_acled_with_token.add_response(
-            url=re.compile(r".*api\.acleddata\.com/acled/read.*"),
+            url=re.compile(r".*acleddata\.com/api/acled/read.*"),
             json=load_fixture("acled_events.json"),
         )
 
@@ -121,7 +123,7 @@ class TestACLEDAdapter:
     async def test_get_events_returns_events(self, mock_acled_with_token) -> None:
         """Test get_events method returns conflict events."""
         mock_acled_with_token.add_response(
-            url=re.compile(r".*api\.acleddata\.com/acled/read.*"),
+            url=re.compile(r".*acleddata\.com/api/acled/read.*"),
             json=load_fixture("acled_events.json"),
         )
 
@@ -144,7 +146,7 @@ class TestACLEDAdapter:
     async def test_get_events_with_date_range(self, mock_acled_with_token) -> None:
         """Test get_events with explicit date range."""
         mock_acled_with_token.add_response(
-            url=re.compile(r".*api\.acleddata\.com/acled/read.*"),
+            url=re.compile(r".*acleddata\.com/api/acled/read.*"),
             json=load_fixture("acled_events.json"),
         )
 
@@ -205,7 +207,7 @@ class TestACLEDAdapter:
     ) -> None:
         """Test that 401 response from API raises AdapterAuthError."""
         mock_acled_with_token.add_response(
-            url=re.compile(r".*api\.acleddata\.com/acled/read.*"),
+            url=re.compile(r".*acleddata\.com/api/acled/read.*"),
             status_code=401,
         )
 
@@ -222,7 +224,7 @@ class TestACLEDAdapter:
     async def test_query_no_data(self, mock_acled_with_token) -> None:
         """Test query returns NO_DATA status for regions with no events."""
         mock_acled_with_token.add_response(
-            url=re.compile(r".*api\.acleddata\.com/acled/read.*"),
+            url=re.compile(r".*acleddata\.com/api/acled/read.*"),
             json={"status": 200, "success": True, "count": 0, "data": []},
         )
 
@@ -239,7 +241,7 @@ class TestACLEDAdapter:
     async def test_query_rate_limited(self, mock_acled_with_token) -> None:
         """Test that 429 response returns RATE_LIMITED status."""
         mock_acled_with_token.add_response(
-            url=re.compile(r".*api\.acleddata\.com/acled/read.*"),
+            url=re.compile(r".*acleddata\.com/api/acled/read.*"),
             status_code=429,
         )
 
@@ -258,7 +260,7 @@ class TestACLEDAdapter:
         """Test that timeout raises AdapterTimeoutError."""
         mock_acled_with_token.add_exception(
             httpx.TimeoutException("Connection timed out"),
-            url=re.compile(r".*api\.acleddata\.com/acled/read.*"),
+            url=re.compile(r".*acleddata\.com/api/acled/read.*"),
         )
 
         adapter = ACLEDAdapter()
@@ -276,7 +278,7 @@ class TestACLEDAdapter:
     ) -> None:
         """Test that invalid JSON raises AdapterParseError."""
         mock_acled_with_token.add_response(
-            url=re.compile(r".*api\.acleddata\.com/acled/read.*"),
+            url=re.compile(r".*acleddata\.com/api/acled/read.*"),
             content=b"not valid json {{{",
             status_code=200,
         )
@@ -295,7 +297,7 @@ class TestACLEDAdapter:
     async def test_health_check_success(self, mock_acled_with_token) -> None:
         """Test health check returns True when API responds."""
         mock_acled_with_token.add_response(
-            url=re.compile(r".*api\.acleddata\.com/acled/read.*"),
+            url=re.compile(r".*acleddata\.com/api/acled/read.*"),
             json={"status": 200, "success": True, "count": 0, "data": []},
             status_code=200,
         )
@@ -347,7 +349,7 @@ class TestACLEDAdapter:
         )
         httpx_mock.add_exception(
             httpx.ConnectError("Connection refused"),
-            url=re.compile(r".*api\.acleddata\.com/acled/read.*"),
+            url=re.compile(r".*acleddata\.com/api/acled/read.*"),
         )
 
         adapter = ACLEDAdapter()
@@ -368,7 +370,7 @@ class TestACLEDAdapter:
 
         # First request - will hit API
         mock_acled_with_token.add_response(
-            url=re.compile(r".*api\.acleddata\.com/acled/read.*"),
+            url=re.compile(r".*acleddata\.com/api/acled/read.*"),
             json=load_fixture("acled_events.json"),
         )
 
@@ -396,7 +398,7 @@ class TestACLEDAdapter:
     async def test_results_include_event_types(self, mock_acled_with_token) -> None:
         """Test that response includes event type breakdown."""
         mock_acled_with_token.add_response(
-            url=re.compile(r".*api\.acleddata\.com/acled/read.*"),
+            url=re.compile(r".*acleddata\.com/api/acled/read.*"),
             json=load_fixture("acled_events.json"),
         )
 
@@ -420,7 +422,7 @@ class TestACLEDAdapter:
     async def test_results_include_actors(self, mock_acled_with_token) -> None:
         """Test that response includes actor information."""
         mock_acled_with_token.add_response(
-            url=re.compile(r".*api\.acleddata\.com/acled/read.*"),
+            url=re.compile(r".*acleddata\.com/api/acled/read.*"),
             json=load_fixture("acled_events.json"),
         )
 
@@ -442,7 +444,7 @@ class TestACLEDAdapter:
     async def test_results_include_fatalities(self, mock_acled_with_token) -> None:
         """Test that response includes fatality counts."""
         mock_acled_with_token.add_response(
-            url=re.compile(r".*api\.acleddata\.com/acled/read.*"),
+            url=re.compile(r".*acleddata\.com/api/acled/read.*"),
             json=load_fixture("acled_events.json"),
         )
 
@@ -465,7 +467,7 @@ class TestACLEDAdapter:
     ) -> None:
         """Test that response includes geographic distribution."""
         mock_acled_with_token.add_response(
-            url=re.compile(r".*api\.acleddata\.com/acled/read.*"),
+            url=re.compile(r".*acleddata\.com/api/acled/read.*"),
             json=load_fixture("acled_events.json"),
         )
 
@@ -499,7 +501,7 @@ class TestACLEDAdapter:
     async def test_close_client_after_use(self, mock_acled_with_token) -> None:
         """Test that close() properly cleans up HTTP client after use."""
         mock_acled_with_token.add_response(
-            url=re.compile(r".*api\.acleddata\.com/acled/read.*"),
+            url=re.compile(r".*acleddata\.com/api/acled/read.*"),
             json=load_fixture("acled_events.json"),
         )
 
@@ -518,7 +520,7 @@ class TestACLEDAdapter:
     async def test_date_range_parsing_last_days(self, mock_acled_with_token) -> None:
         """Test parsing 'last N days' format."""
         mock_acled_with_token.add_response(
-            url=re.compile(r".*api\.acleddata\.com/acled/read.*"),
+            url=re.compile(r".*acleddata\.com/api/acled/read.*"),
             json=load_fixture("acled_events.json"),
         )
 
@@ -538,7 +540,7 @@ class TestACLEDAdapter:
     async def test_date_range_parsing_last_weeks(self, mock_acled_with_token) -> None:
         """Test parsing 'last N weeks' format."""
         mock_acled_with_token.add_response(
-            url=re.compile(r".*api\.acleddata\.com/acled/read.*"),
+            url=re.compile(r".*acleddata\.com/api/acled/read.*"),
             json=load_fixture("acled_events.json"),
         )
 
@@ -557,7 +559,7 @@ class TestACLEDAdapter:
     async def test_api_error_response(self, mock_acled_with_token) -> None:
         """Test handling of API-level error response."""
         mock_acled_with_token.add_response(
-            url=re.compile(r".*api\.acleddata\.com/acled/read.*"),
+            url=re.compile(r".*acleddata\.com/api/acled/read.*"),
             json={"status": 400, "success": False, "error": "Invalid country"},
             status_code=200,  # API returns 200 with error in body
         )
@@ -575,7 +577,7 @@ class TestACLEDAdapter:
     async def test_normalized_events_in_results(self, mock_acled_with_token) -> None:
         """Test that individual events are normalized and included in results."""
         mock_acled_with_token.add_response(
-            url=re.compile(r".*api\.acleddata\.com/acled/read.*"),
+            url=re.compile(r".*acleddata\.com/api/acled/read.*"),
             json=load_fixture("acled_events.json"),
         )
 
@@ -605,12 +607,12 @@ class TestACLEDAdapter:
         """Test that trend comparison is calculated when date range is specified."""
         # Mock current period response
         mock_acled_with_token.add_response(
-            url=re.compile(r".*api\.acleddata\.com/acled/read.*"),
+            url=re.compile(r".*acleddata\.com/api/acled/read.*"),
             json=load_fixture("acled_events.json"),
         )
         # Mock previous period response (for trend comparison)
         mock_acled_with_token.add_response(
-            url=re.compile(r".*api\.acleddata\.com/acled/read.*"),
+            url=re.compile(r".*acleddata\.com/api/acled/read.*"),
             json={
                 "status": 200,
                 "success": True,
@@ -646,7 +648,7 @@ class TestACLEDAdapter:
     ) -> None:
         """Test that trend comparison is not included when no date range is specified."""
         mock_acled_with_token.add_response(
-            url=re.compile(r".*api\.acleddata\.com/acled/read.*"),
+            url=re.compile(r".*acleddata\.com/api/acled/read.*"),
             json=load_fixture("acled_events.json"),
         )
 
@@ -670,12 +672,12 @@ class TestACLEDAdapter:
         """Test that trend comparison failure doesn't break the main query."""
         # Mock current period response
         mock_acled_with_token.add_response(
-            url=re.compile(r".*api\.acleddata\.com/acled/read.*"),
+            url=re.compile(r".*acleddata\.com/api/acled/read.*"),
             json=load_fixture("acled_events.json"),
         )
         # Mock previous period response with error
         mock_acled_with_token.add_response(
-            url=re.compile(r".*api\.acleddata\.com/acled/read.*"),
+            url=re.compile(r".*acleddata\.com/api/acled/read.*"),
             status_code=500,
         )
 
@@ -696,7 +698,7 @@ class TestACLEDAdapter:
     async def test_api_request_uses_bearer_token(self, mock_acled_with_token) -> None:
         """Test that API requests use Bearer token authentication."""
         mock_acled_with_token.add_response(
-            url=re.compile(r".*api\.acleddata\.com/acled/read.*"),
+            url=re.compile(r".*acleddata\.com/api/acled/read.*"),
             json=load_fixture("acled_events.json"),
         )
 
@@ -705,7 +707,7 @@ class TestACLEDAdapter:
 
         # Find the API request (not the token request)
         requests = mock_acled_with_token.get_requests()
-        api_request = next(r for r in requests if "acleddata.com/acled/read" in str(r.url))
+        api_request = next(r for r in requests if "acleddata.com/api/acled/read" in str(r.url))
 
         # Verify Authorization header is present with Bearer token
         assert "authorization" in [h.lower() for h in api_request.headers.keys()]

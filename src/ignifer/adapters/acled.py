@@ -61,7 +61,7 @@ class ACLEDAdapter:
         base_quality_tier: QualityTier.HIGH (academic research quality)
     """
 
-    BASE_URL = "https://api.acleddata.com/acled/read"
+    BASE_URL = "https://acleddata.com/api/acled/read"
     DEFAULT_TIMEOUT = 15.0  # seconds
     DEFAULT_LIMIT = 500  # Default number of events to fetch
     TOKEN_REFRESH_MARGIN = 300  # Refresh token 5 minutes before expiry
@@ -290,6 +290,7 @@ class ACLEDAdapter:
         """
         try:
             query_params: dict[str, str | int] = {
+                "_format": "json",
                 "country": country,
                 "limit": self.DEFAULT_LIMIT,
                 "event_date": date_range,
@@ -553,6 +554,7 @@ class ACLEDAdapter:
 
         # Build request URL (no credentials in query params - use Bearer token)
         query_params: dict[str, str | int] = {
+            "_format": "json",
             "country": country,
             "limit": self.DEFAULT_LIMIT,
         }
@@ -759,6 +761,7 @@ class ACLEDAdapter:
             client = await self._get_client()
             # Make a minimal query to test connectivity
             query_params = {
+                "_format": "json",
                 "limit": 1,
                 "country": "Norway",  # Use a country with typically few events
             }
