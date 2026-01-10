@@ -12,6 +12,7 @@ from ignifer.adapters.base import (
 )
 from ignifer.adapters.gdelt import GDELTAdapter
 from ignifer.adapters.opensky import OpenSkyAdapter
+from ignifer.adapters.opensanctions import OpenSanctionsAdapter
 from ignifer.adapters.wikidata import WikidataAdapter
 from ignifer.adapters.worldbank import WorldBankAdapter
 
@@ -24,6 +25,7 @@ __all__ = [
     "ACLEDAdapter",
     "AISStreamAdapter",
     "GDELTAdapter",
+    "OpenSanctionsAdapter",
     "OpenSkyAdapter",
     "WikidataAdapter",
     "WorldBankAdapter",
