@@ -168,8 +168,9 @@ class TestCredentialHelperMethods:
         assert settings.has_opensky_credentials() is False
 
     def test_has_acled_credentials_true(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """has_acled_credentials returns True when key is set."""
+        """has_acled_credentials returns True when both key and email are set."""
         monkeypatch.setenv("IGNIFER_ACLED_KEY", "key")
+        monkeypatch.setenv("IGNIFER_ACLED_EMAIL", "email@example.com")
 
         settings = Settings()
 
