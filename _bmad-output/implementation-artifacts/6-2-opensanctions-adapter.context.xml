@@ -1,0 +1,1120 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<story-context story-id="6.2" title="OpenSanctions Adapter">
+  <metadata>
+    <generated>2026-01-09</generated>
+    <story-file>_bmad-output/implementation-artifacts/6-2-opensanctions-adapter.md</story-file>
+  </metadata>
+
+  <project-rules>
+    <!-- Key rules from project-context.md -->
+    <rule priority="critical">snake_case for all JSON fields - no exceptions</rule>
+    <rule priority="critical">datetime.now(timezone.utc) - never naive datetime</rule>
+    <rule priority="critical">Adapter-owned httpx clients - never shared across adapters</rule>
+    <rule priority="critical">stdlib logging only - use logging.getLogger(__name__)</rule>
+    <rule priority="critical">{Source}Adapter naming - class must be OpenSanctionsAdapter</rule>
+    <rule priority="critical">Hybrid error handling - exceptions for unexpected, Result type for expected</rule>
+    <rule priority="critical">ISO 8601 + timezone for all datetime serialization</rule>
+    <rule priority="critical">Adapters MUST NOT import from server.py or tools - layer boundary rule</rule>
+
+    <error-handling-contract>
+      <scenario type="exception">Network timeout - AdapterTimeoutError</scenario>
+      <scenario type="result">Rate limited - OSINTResult(status=RATE_LIMITED)</scenario>
+      <scenario type="result">No data found - OSINTResult(status=NO_DATA)</scenario>
+      <scenario type="exception">Malformed response - AdapterParseError</scenario>
+      <scenario type="exception">Auth failure - AdapterAuthError</scenario>
+    </error-handling-contract>
+
+    <cache-ttl source="opensanctions">86400 seconds (24 hours)</cache-ttl>
+  </project-rules>
+
+  <adapter-protocol>
+    <!-- Full OSINTAdapter protocol from base.py -->
+    <![CDATA[
+@runtime_checkable
+class OSINTAdapter(Protocol):
+    """Protocol for all OSINT data source adapters.
+
+    All adapters MUST implement this protocol. The @runtime_checkable
+    decorator enables isinstance() checks without explicit inheritance.
+
+    Error Handling Contract:
+    - AdapterTimeoutError: Network timeouts (unexpected)
+    - AdapterParseError: Malformed API responses (unexpected)
+    - AdapterAuthError: Authentication failures (unexpected)
+    - OSINTResult(status=RateLimited): Rate limiting (expected)
+    - OSINTResult(status=NoData): No results found (expected)
+    """
+
+    @property
+    def source_name(self) -> str:
+        """Unique identifier for this data source (e.g., 'gdelt', 'opensky')."""
+        ...
+
+    @property
+    def base_quality_tier(self) -> QualityTier:
+        """Default quality tier for this source's data."""
+        ...
+
+    async def query(self, params: QueryParams) -> OSINTResult:
+        """Execute a query against this data source.
+
+        Args:
+            params: Query parameters including topic, time_range, etc.
+
+        Returns:
+            OSINTResult with status, data, and source attribution.
+
+        Raises:
+            AdapterTimeoutError: If the request times out.
+            AdapterParseError: If the response cannot be parsed.
+            AdapterAuthError: If authentication fails.
+        """
+        ...
+
+    async def health_check(self) -> bool:
+        """Check if the data source is reachable and responding.
+
+        Returns:
+            True if healthy, False otherwise.
+        """
+        ...
+    ]]>
+
+    <error-classes>
+      <![CDATA[
+class AdapterError(Exception):
+    """Base exception for all adapter errors."""
+    def __init__(self, source_name: str, message: str) -> None:
+        self.source_name = source_name
+        self.message = message
+        super().__init__(f"[{source_name}] {message}")
+
+class AdapterTimeoutError(AdapterError):
+    """Raised when an adapter request times out."""
+    def __init__(self, source_name: str, timeout_seconds: float | None = None) -> None:
+        msg = "Request timed out"
+        if timeout_seconds is not None:
+            msg = f"Request timed out after {timeout_seconds}s"
+        super().__init__(source_name, msg)
+        self.timeout_seconds = timeout_seconds
+
+class AdapterParseError(AdapterError):
+    """Raised when an API response cannot be parsed."""
+    def __init__(self, source_name: str, details: str | None = None) -> None:
+        msg = "Failed to parse API response"
+        if details:
+            msg = f"Failed to parse API response: {details}"
+        super().__init__(source_name, msg)
+        self.details = details
+
+class AdapterAuthError(AdapterError):
+    """Raised when authentication fails."""
+    def __init__(self, source_name: str, details: str | None = None) -> None:
+        msg = "Authentication failed"
+        if details:
+            msg = f"Authentication failed: {details}"
+        super().__init__(source_name, msg)
+        self.details = details
+      ]]>
+    </error-classes>
+
+    <helper-function name="handle_http_status">
+      <![CDATA[
+def handle_http_status(
+    source_name: str,
+    status_code: int,
+    no_data_error_msg: str = "Resource not found.",
+) -> tuple[str, Exception | None]:
+    """Handle HTTP status codes and return appropriate result type.
+
+    Args:
+        source_name: Name of the adapter (for error messages)
+        status_code: HTTP response status code
+        no_data_error_msg: Custom error message for 404 responses
+
+    Returns:
+        Tuple of (result_type, exception_or_none) where result_type is:
+        - "success" for 2xx codes
+        - "rate_limited" for 429
+        - "no_data" for 404
+        - "server_error" for 5xx (returns AdapterTimeoutError)
+        - "client_error" for other 4xx (returns AdapterParseError)
+    """
+    if 200 <= status_code < 300:
+        return "success", None
+    elif status_code == 429:
+        return "rate_limited", None
+    elif status_code == 404:
+        return "no_data", None
+    elif status_code >= 500:
+        return "server_error", AdapterTimeoutError(source_name)
+    else:
+        return "client_error", AdapterParseError(source_name, f"HTTP {status_code} error")
+      ]]>
+    </helper-function>
+  </adapter-protocol>
+
+  <reference-implementations>
+    <!-- Patterns from wikidata.py - entity lookup pattern similar to OpenSanctions -->
+    <wikidata-adapter-pattern>
+      <class-structure>
+        <![CDATA[
+class WikidataAdapter:
+    """Wikidata adapter for entity information.
+
+    Attributes:
+        source_name: "wikidata"
+        base_quality_tier: QualityTier.HIGH (curated encyclopedic data)
+    """
+
+    BASE_URL = "https://www.wikidata.org/w/api.php"
+    DEFAULT_TIMEOUT = 15.0  # seconds
+    MAX_SEARCH_RESULTS = 10
+
+    def __init__(self, cache: CacheManager | None = None) -> None:
+        """Initialize the Wikidata adapter.
+
+        Args:
+            cache: Optional cache manager for caching results.
+        """
+        self._client: httpx.AsyncClient | None = None
+        self._cache = cache
+
+    @property
+    def source_name(self) -> str:
+        """Unique identifier for this data source."""
+        return "wikidata"
+
+    @property
+    def base_quality_tier(self) -> QualityTier:
+        """Default quality tier for this source's data."""
+        return QualityTier.HIGH
+
+    async def _get_client(self) -> httpx.AsyncClient:
+        """Lazy initialization of HTTP client."""
+        if self._client is None:
+            self._client = httpx.AsyncClient(
+                timeout=httpx.Timeout(self.DEFAULT_TIMEOUT),
+                headers={"User-Agent": "Ignifer/1.0 (OSINT research tool)"},
+            )
+        return self._client
+        ]]>
+      </class-structure>
+
+      <query-method-pattern>
+        <![CDATA[
+    async def query(self, params: QueryParams) -> OSINTResult:
+        query_text = params.query.strip()
+        if not query_text:
+            return OSINTResult(
+                status=ResultStatus.NO_DATA,
+                query=params.query,
+                results=[],
+                sources=[],
+                retrieved_at=datetime.now(timezone.utc),
+                error="Query string is empty.",
+            )
+
+        # Generate cache key
+        key = cache_key(self.source_name, "search", text=query_text.lower())
+
+        # Check cache
+        if self._cache:
+            cached = await self._cache.get(key)
+            if cached and cached.data and not cached.is_stale:
+                logger.debug(f"Cache hit for {key}")
+                return self._build_result_from_cache(params.query, cached.data)
+
+        client = await self._get_client()
+        logger.info(f"Searching for: {query_text}")
+
+        try:
+            response = await client.get(self.BASE_URL, params=search_params)
+        except httpx.TimeoutException as e:
+            logger.warning(f"Timeout: {e}")
+            raise AdapterTimeoutError(self.source_name, self.DEFAULT_TIMEOUT) from e
+        except httpx.ConnectError as e:
+            logger.error(f"Connection error: {e}")
+            raise AdapterTimeoutError(self.source_name, self.DEFAULT_TIMEOUT) from e
+        except httpx.RequestError as e:
+            logger.error(f"Request error: {e}")
+            raise AdapterTimeoutError(self.source_name, self.DEFAULT_TIMEOUT) from e
+
+        # Handle HTTP status codes
+        status_type, exc = handle_http_status(
+            self.source_name, response.status_code, "API endpoint not found."
+        )
+        if status_type == "rate_limited":
+            logger.warning("Rate limited")
+            return OSINTResult(
+                status=ResultStatus.RATE_LIMITED,
+                query=params.query,
+                results=[],
+                sources=[],
+                retrieved_at=datetime.now(timezone.utc),
+            )
+        if status_type == "no_data":
+            return OSINTResult(...)
+        if exc:
+            logger.error(f"HTTP error: {response.status_code}")
+            raise exc
+
+        # Parse response
+        try:
+            data = response.json()
+        except Exception as e:
+            raise AdapterParseError(self.source_name, "Invalid JSON response") from e
+        ]]>
+      </query-method-pattern>
+
+      <close-method-pattern>
+        <![CDATA[
+    async def close(self) -> None:
+        """Close the HTTP client."""
+        if self._client:
+            await self._client.aclose()
+            self._client = None
+            logger.debug("Adapter client closed")
+        ]]>
+      </close-method-pattern>
+    </wikidata-adapter-pattern>
+
+    <!-- Patterns from acled.py - authenticated API pattern -->
+    <acled-adapter-pattern>
+      <credential-checking>
+        <![CDATA[
+# Note: OpenSanctions free tier doesn't require API key for basic queries
+# But this pattern shows how to handle optional credentials if API key is available
+
+    def _get_credentials(self) -> tuple[str, str] | None:
+        """Get API key and email from settings.
+
+        Returns:
+            Tuple of (api_key, email), or None if not configured.
+        """
+        settings = get_settings()
+        if not settings.has_acled_credentials():
+            return None
+        return (
+            settings.acled_key.get_secret_value(),
+            settings.acled_email.get_secret_value(),
+        )
+        ]]>
+      </credential-checking>
+
+      <health-check-pattern>
+        <![CDATA[
+    async def health_check(self) -> bool:
+        """Check if API is reachable.
+
+        Returns:
+            True if API responds, False otherwise.
+        """
+        try:
+            client = await self._get_client()
+            # Make a minimal query to test connectivity
+            response = await client.get(url)
+            return response.status_code == 200
+        except Exception as e:
+            logger.warning(f"Health check failed: {e}")
+            return False
+        ]]>
+      </health-check-pattern>
+
+      <cache-result-building>
+        <![CDATA[
+    def _build_result_from_cache(
+        self, query: str, cached_data: dict[str, Any]
+    ) -> OSINTResult:
+        """Build OSINTResult from cached data."""
+        results = cached_data.get("results", [])
+
+        retrieved_at = datetime.now(timezone.utc)
+        return OSINTResult(
+            status=ResultStatus.SUCCESS,
+            query=query,
+            results=results,
+            sources=[
+                SourceAttribution(
+                    source=self.source_name,
+                    quality=self.base_quality_tier,
+                    confidence=ConfidenceLevel.VERY_LIKELY,
+                    metadata=SourceMetadata(
+                        source_name=self.source_name,
+                        source_url=self.BASE_URL,
+                        retrieved_at=retrieved_at,
+                    ),
+                )
+            ],
+            retrieved_at=retrieved_at,
+        )
+        ]]>
+      </cache-result-building>
+    </acled-adapter-pattern>
+  </reference-implementations>
+
+  <cache-integration>
+    <cache-key-function>
+      <![CDATA[
+def cache_key(adapter: str, query: str, **params: Any) -> str:
+    """Deterministic cache key generation.
+
+    Format: {adapter}:{query}:{params_hash}
+    Hash is first 12 chars of SHA256 of sorted JSON params.
+
+    Args:
+        adapter: Adapter name (e.g., "opensanctions")
+        query: Query type (e.g., "match", "search", "entity")
+        **params: Query parameters
+
+    Returns:
+        Cache key string in format {adapter}:{query}:{params_hash}
+    """
+    sorted_params = sorted(params.items())
+    params_hash = hashlib.sha256(json.dumps(sorted_params, sort_keys=True).encode()).hexdigest()[:12]
+    return f"{adapter}:{query}:{params_hash}"
+      ]]>
+    </cache-key-function>
+
+    <cache-usage-pattern>
+      <![CDATA[
+# Generate cache key - use different query types to prevent collisions
+key = cache_key(self.source_name, "match", name=entity_name.lower())
+# OR
+key = cache_key(self.source_name, "entity", entity_id=entity_id)
+
+# Check cache
+if self._cache:
+    cached = await self._cache.get(key)
+    if cached and cached.data and not cached.is_stale:
+        logger.debug(f"Cache hit for {key}")
+        return self._build_result_from_cache(query, cached.data)
+
+# ... fetch from API ...
+
+# Cache results (24-hour TTL for OpenSanctions)
+if self._cache and results:
+    settings = get_settings()
+    await self._cache.set(
+        key=key,
+        data={"results": results, "query": query},
+        ttl_seconds=settings.ttl_opensanctions,  # 86400 = 24 hours
+        source=self.source_name,
+    )
+      ]]>
+    </cache-usage-pattern>
+  </cache-integration>
+
+  <models-reference>
+    <![CDATA[
+class ConfidenceLevel(Enum):
+    """ICD 203 intelligence confidence levels."""
+    REMOTE = 1       # <20%
+    UNLIKELY = 2     # 20-40%
+    EVEN_CHANCE = 3  # 40-60%
+    LIKELY = 4       # 60-80%
+    VERY_LIKELY = 5  # 80-95%
+    ALMOST_CERTAIN = 6  # >95%
+
+class QualityTier(Enum):
+    """Source quality tier classification."""
+    HIGH = "H"    # Official sources, academic research
+    MEDIUM = "M"  # Reputable news, verified OSINT
+    LOW = "L"     # Social media, unverified reports
+
+class ResultStatus(Enum):
+    """Result status enumeration."""
+    SUCCESS = "success"
+    NO_DATA = "no_data"
+    RATE_LIMITED = "rate_limited"
+    ERROR = "error"
+
+class QueryParams(BaseModel):
+    query: str
+    include_sources: list[str] | None = None
+    exclude_sources: list[str] | None = None
+    max_results_per_source: int = 10
+    time_range: str | None = None
+
+class SourceMetadata(BaseModel):
+    source_name: str
+    source_url: str
+    retrieved_at: datetime
+
+class SourceAttribution(BaseModel):
+    source: str
+    quality: QualityTier
+    confidence: ConfidenceLevel
+    metadata: SourceMetadata
+
+class OSINTResult(BaseModel):
+    status: ResultStatus
+    query: str
+    results: list[dict[str, str | int | float | bool | None]]  # Flat dicts only!
+    sources: list[SourceAttribution]
+    retrieved_at: datetime
+    error: str | None = None
+    ]]>
+  </models-reference>
+
+  <opensanctions-api>
+    <!-- OpenSanctions API documentation and patterns -->
+    <api-overview>
+      <base-url>https://api.opensanctions.org/</base-url>
+      <authentication>
+        <description>Free for non-commercial use - no API key required for basic queries</description>
+        <note>Rate limits apply to free tier. API key available for higher rate limits if needed.</note>
+      </authentication>
+    </api-overview>
+
+    <endpoints>
+      <endpoint name="match">
+        <url>/match/default</url>
+        <method>POST</method>
+        <description>Match entities against sanctions database</description>
+        <request-format>
+          <![CDATA[
+{
+  "queries": {
+    "q1": {
+      "schema": "Person",
+      "properties": {
+        "name": ["Viktor Vekselberg"]
+      }
+    }
+  }
+}
+          ]]>
+        </request-format>
+        <response-format>
+          <![CDATA[
+{
+  "responses": {
+    "q1": {
+      "query": {...},
+      "total": {"value": 2, "relation": "eq"},
+      "results": [
+        {
+          "id": "NK-....",
+          "caption": "Viktor Vekselberg",
+          "schema": "Person",
+          "properties": {
+            "name": ["Viktor Vekselberg", "Виктор Вексельберг"],
+            "birthDate": ["1957-04-14"],
+            "nationality": ["ru"],
+            "position": ["Businessman"],
+            "topics": ["sanction"]
+          },
+          "datasets": ["us_ofac_sdn", "eu_fsf", "ch_seco_sanctions"],
+          "referents": ["ofac-..."],
+          "score": 0.98
+        }
+      ]
+    }
+  }
+}
+          ]]>
+        </response-format>
+      </endpoint>
+
+      <endpoint name="search">
+        <url>/search/default</url>
+        <method>GET</method>
+        <description>Search entities by name/text</description>
+        <parameters>
+          <param name="q" type="string">Search query string</param>
+          <param name="schema" type="string">Filter by entity type (Person, Company, Vessel, etc.)</param>
+          <param name="datasets" type="string">Filter by specific sanctions lists</param>
+          <param name="limit" type="int" default="10">Number of results</param>
+        </parameters>
+      </endpoint>
+
+      <endpoint name="entities">
+        <url>/entities/{id}</url>
+        <method>GET</method>
+        <description>Get entity by OpenSanctions ID</description>
+        <response-format>
+          <![CDATA[
+{
+  "id": "NK-....",
+  "caption": "Viktor Vekselberg",
+  "schema": "Person",
+  "properties": {
+    "name": ["Viktor Vekselberg"],
+    "alias": ["Виктор Вексельберг"],
+    "birthDate": ["1957-04-14"],
+    "nationality": ["ru"],
+    "topics": ["sanction"],
+    "position": ["Chairman of Renova Group"]
+  },
+  "datasets": ["us_ofac_sdn", "eu_fsf"],
+  "referents": ["ofac-12345"],
+  "first_seen": "2018-04-06",
+  "last_seen": "2024-01-15"
+}
+          ]]>
+        </response-format>
+      </endpoint>
+    </endpoints>
+
+    <entity-types>
+      <type>Person</type>
+      <type>Company</type>
+      <type>Organization</type>
+      <type>LegalEntity</type>
+      <type>Vessel</type>
+      <type>Aircraft</type>
+    </entity-types>
+
+    <datasets-sanctions-lists>
+      <dataset code="us_ofac_sdn">OFAC SDN List (US)</dataset>
+      <dataset code="eu_fsf">EU Financial Sanctions</dataset>
+      <dataset code="un_sc_sanctions">UN Security Council</dataset>
+      <dataset code="gb_hmt_sanctions">UK HMT</dataset>
+      <dataset code="ch_seco_sanctions">Swiss SECO</dataset>
+      <dataset code="ru_rupep">Russian PEPs</dataset>
+      <dataset code="ua_nazk_pep">Ukrainian PEPs</dataset>
+    </datasets-sanctions-lists>
+
+    <topics>
+      <topic code="sanction">Currently sanctioned</topic>
+      <topic code="poi">Person of Interest</topic>
+      <topic code="role.pep">Politically Exposed Person</topic>
+      <topic code="crime">Linked to criminal activity</topic>
+    </topics>
+
+    <confidence-score-mapping>
+      <!-- OpenSanctions returns score field (0.0-1.0) for each match -->
+      <mapping score-min="0.9" score-max="1.0" confidence="ConfidenceLevel.HIGH" label="HIGH" />
+      <mapping score-min="0.7" score-max="0.9" confidence="ConfidenceLevel.MEDIUM" label="MEDIUM" />
+      <mapping score-min="0.5" score-max="0.7" confidence="ConfidenceLevel.LOW" label="LOW" />
+      <mapping score-min="0.0" score-max="0.5" action="exclude_or_flag" label="Consider excluding or flagging" />
+      <note>Map to ConfidenceLevel enum values: VERY_LIKELY for HIGH, LIKELY for MEDIUM, EVEN_CHANCE for LOW</note>
+    </confidence-score-mapping>
+
+    <pep-detection-logic>
+      <!-- FR19 compliance: Distinguish PEP-only from sanctioned entities -->
+      <![CDATA[
+# Check topics field for PEP detection
+topics = entity.get("properties", {}).get("topics", [])
+
+is_sanctioned = "sanction" in topics
+is_pep = "role.pep" in topics
+
+if is_pep and not is_sanctioned:
+    # PEP-only entity - not currently sanctioned
+    # Return with:
+    # - PEP status
+    # - Position held (from properties.position)
+    # - "NOT CURRENTLY SANCTIONED" flag
+    # - Note: "Enhanced due diligence recommended for PEPs"
+      ]]>
+    </pep-detection-logic>
+  </opensanctions-api>
+
+  <test-patterns>
+    <!-- Test patterns from existing adapter tests -->
+    <fixture-loading>
+      <![CDATA[
+import json
+from pathlib import Path
+
+FIXTURES_DIR = Path(__file__).parent.parent / "fixtures"
+
+def load_fixture(name: str) -> dict:
+    """Load a JSON fixture file."""
+    with open(FIXTURES_DIR / name) as f:
+        return json.load(f)
+      ]]>
+    </fixture-loading>
+
+    <test-class-structure>
+      <![CDATA[
+class TestOpenSanctionsAdapterProperties:
+    """Tests for OpenSanctionsAdapter class properties."""
+
+    def test_source_name(self) -> None:
+        """Source name is 'opensanctions'."""
+        adapter = OpenSanctionsAdapter()
+        assert adapter.source_name == "opensanctions"
+
+    def test_base_quality_tier_is_high(self) -> None:
+        """Base quality tier is HIGH (official sanctions data)."""
+        adapter = OpenSanctionsAdapter()
+        assert adapter.base_quality_tier == QualityTier.HIGH
+
+class TestOpenSanctionsAdapterQuery:
+    """Tests for query functionality."""
+
+    @pytest.mark.asyncio
+    async def test_query_success(self, httpx_mock) -> None:
+        """Successful query returns normalized results."""
+        httpx_mock.add_response(
+            url=re.compile(r".*api\.opensanctions\.org.*"),
+            json=load_fixture("opensanctions_entity.json"),
+        )
+
+        adapter = OpenSanctionsAdapter()
+        result = await adapter.query(QueryParams(query="Viktor Vekselberg"))
+
+        assert result.status == ResultStatus.SUCCESS
+        assert len(result.results) > 0
+        assert result.sources[0].source == "opensanctions"
+        assert result.sources[0].quality == QualityTier.HIGH
+
+        await adapter.close()
+      ]]>
+    </test-class-structure>
+
+    <mock-http-pattern>
+      <![CDATA[
+@pytest.mark.asyncio
+async def test_query_timeout_raises_error(self, httpx_mock) -> None:
+    """Timeout raises AdapterTimeoutError."""
+    httpx_mock.add_exception(
+        httpx.TimeoutException("Timeout"),
+        url=re.compile(r".*api\.opensanctions\.org.*"),
+    )
+
+    adapter = OpenSanctionsAdapter()
+    with pytest.raises(AdapterTimeoutError) as exc_info:
+        await adapter.query(QueryParams(query="Test"))
+
+    assert exc_info.value.source_name == "opensanctions"
+
+@pytest.mark.asyncio
+async def test_query_rate_limited(self, httpx_mock) -> None:
+    """429 response returns RATE_LIMITED status."""
+    httpx_mock.add_response(
+        url=re.compile(r".*api\.opensanctions\.org.*"),
+        status_code=429,
+    )
+
+    adapter = OpenSanctionsAdapter()
+    result = await adapter.query(QueryParams(query="Test"))
+
+    assert result.status == ResultStatus.RATE_LIMITED
+
+@pytest.mark.asyncio
+async def test_query_malformed_json_raises_parse_error(self, httpx_mock) -> None:
+    """Malformed JSON response raises AdapterParseError."""
+    httpx_mock.add_response(
+        url=re.compile(r".*api\.opensanctions\.org.*"),
+        content=b"not valid json {{{",
+        status_code=200,
+    )
+
+    adapter = OpenSanctionsAdapter()
+    with pytest.raises(AdapterParseError) as exc_info:
+        await adapter.query(QueryParams(query="Test"))
+
+    assert "Invalid JSON response" in str(exc_info.value)
+      ]]>
+    </mock-http-pattern>
+
+    <cache-test-pattern>
+      <![CDATA[
+@pytest.mark.asyncio
+@pytest.mark.httpx_mock(can_send_already_matched_responses=True)
+async def test_cache_hit(self, httpx_mock, tmp_path) -> None:
+    """Test that cached results are returned without making HTTP request."""
+    from ignifer.cache import CacheManager, MemoryCache, SQLiteCache
+
+    db_path = tmp_path / "test_cache.db"
+    cache = CacheManager(l1=MemoryCache(), l2=SQLiteCache(db_path=db_path))
+
+    # First request - will hit API
+    httpx_mock.add_response(
+        url=re.compile(r".*api\.opensanctions\.org.*"),
+        json=load_fixture("opensanctions_entity.json"),
+    )
+
+    adapter = OpenSanctionsAdapter(cache=cache)
+    result1 = await adapter.query(QueryParams(query="Viktor Vekselberg"))
+
+    assert result1.status == ResultStatus.SUCCESS
+    requests_made = len(httpx_mock.get_requests())
+    assert requests_made >= 1
+
+    # Second request - should hit cache
+    result2 = await adapter.query(QueryParams(query="Viktor Vekselberg"))
+    assert result2.status == ResultStatus.SUCCESS
+    assert len(httpx_mock.get_requests()) == requests_made
+
+    await adapter.close()
+    await cache.close()
+      ]]>
+    </cache-test-pattern>
+  </test-patterns>
+
+  <implementation-guidance>
+    <file-structure>
+      <new-files>
+        <file path="src/ignifer/adapters/opensanctions.py">OpenSanctionsAdapter implementation</file>
+        <file path="tests/adapters/test_opensanctions.py">Test suite</file>
+        <file path="tests/fixtures/opensanctions_entity.json">Mock match response</file>
+        <file path="tests/fixtures/opensanctions_pep.json">Mock PEP-only response (FR19)</file>
+        <file path="tests/fixtures/opensanctions_no_match.json">Mock empty response</file>
+      </new-files>
+      <modified-files>
+        <file path="src/ignifer/adapters/__init__.py">Add OpenSanctionsAdapter export</file>
+      </modified-files>
+    </file-structure>
+
+    <imports-template>
+      <![CDATA[
+"""OpenSanctions adapter for sanctions and PEP screening.
+
+Provides access to sanctions lists (OFAC, EU, UN, etc.) and
+Politically Exposed Person (PEP) data via the OpenSanctions API.
+
+API Reference: https://www.opensanctions.org/docs/api/
+"""
+
+import logging
+from datetime import datetime, timezone
+from typing import Any
+
+import httpx
+
+from ignifer.adapters.base import AdapterParseError, AdapterTimeoutError, handle_http_status
+from ignifer.cache import CacheManager, cache_key
+from ignifer.config import get_settings
+from ignifer.models import (
+    ConfidenceLevel,
+    OSINTResult,
+    QualityTier,
+    QueryParams,
+    ResultStatus,
+    SourceAttribution,
+    SourceMetadata,
+)
+
+logger = logging.getLogger(__name__)
+      ]]>
+    </imports-template>
+
+    <class-skeleton>
+      <![CDATA[
+class OpenSanctionsAdapter:
+    """OpenSanctions adapter for sanctions and PEP screening.
+
+    Provides screening against global sanctions lists and PEP databases.
+    Free for non-commercial use (no API key required for basic queries).
+
+    Attributes:
+        source_name: "opensanctions"
+        base_quality_tier: QualityTier.HIGH (official sanctions data)
+    """
+
+    BASE_URL = "https://api.opensanctions.org"
+    DEFAULT_TIMEOUT = 15.0  # seconds
+    MAX_RESULTS = 10
+
+    def __init__(self, cache: CacheManager | None = None) -> None:
+        """Initialize the OpenSanctions adapter.
+
+        Args:
+            cache: Optional cache manager for caching results.
+        """
+        self._client: httpx.AsyncClient | None = None
+        self._cache = cache
+
+    @property
+    def source_name(self) -> str:
+        """Unique identifier for this data source."""
+        return "opensanctions"
+
+    @property
+    def base_quality_tier(self) -> QualityTier:
+        """Default quality tier for this source's data."""
+        return QualityTier.HIGH
+
+    async def _get_client(self) -> httpx.AsyncClient:
+        """Lazy initialization of HTTP client."""
+        if self._client is None:
+            self._client = httpx.AsyncClient(
+                timeout=httpx.Timeout(self.DEFAULT_TIMEOUT),
+                headers={"User-Agent": "Ignifer/1.0 (OSINT research tool)"},
+            )
+        return self._client
+
+    def _map_score_to_confidence(self, score: float) -> ConfidenceLevel:
+        """Map OpenSanctions match score to ConfidenceLevel.
+
+        Args:
+            score: OpenSanctions match score (0.0-1.0)
+
+        Returns:
+            Appropriate ConfidenceLevel enum value
+        """
+        if score >= 0.9:
+            return ConfidenceLevel.VERY_LIKELY
+        elif score >= 0.7:
+            return ConfidenceLevel.LIKELY
+        elif score >= 0.5:
+            return ConfidenceLevel.EVEN_CHANCE
+        else:
+            return ConfidenceLevel.UNLIKELY
+
+    def _is_pep_only(self, topics: list[str]) -> bool:
+        """Check if entity is PEP but not sanctioned (FR19).
+
+        Args:
+            topics: List of topics from entity properties
+
+        Returns:
+            True if PEP but not sanctioned
+        """
+        is_sanctioned = "sanction" in topics
+        is_pep = "role.pep" in topics
+        return is_pep and not is_sanctioned
+
+    def _normalize_entity(
+        self, entity: dict[str, Any], score: float | None = None
+    ) -> dict[str, str | int | float | bool | None]:
+        """Normalize OpenSanctions entity to flat dict.
+
+        Args:
+            entity: Raw entity from API response
+            score: Optional match score
+
+        Returns:
+            Flattened entity dict with scalar values only
+        """
+        # Extract from entity
+        properties = entity.get("properties", {})
+        topics = properties.get("topics", [])
+        datasets = entity.get("datasets", [])
+
+        # Build flat result dict
+        result: dict[str, str | int | float | bool | None] = {
+            "entity_id": entity.get("id"),
+            "caption": entity.get("caption"),
+            "schema": entity.get("schema"),  # Person, Company, Vessel, etc.
+            "name": ", ".join(properties.get("name", [])),
+            "aliases": ", ".join(properties.get("alias", [])),
+            "birth_date": properties.get("birthDate", [None])[0] if properties.get("birthDate") else None,
+            "nationality": ", ".join(properties.get("nationality", [])),
+            "position": ", ".join(properties.get("position", [])),
+            "sanctions_lists": ", ".join(datasets),
+            "sanctions_count": len(datasets),
+            "is_sanctioned": "sanction" in topics,
+            "is_pep": "role.pep" in topics,
+            "is_poi": "poi" in topics,
+            "first_seen": entity.get("first_seen"),
+            "last_seen": entity.get("last_seen"),
+            "url": f"https://www.opensanctions.org/entities/{entity.get('id')}",
+        }
+
+        # Add match score if provided
+        if score is not None:
+            result["match_score"] = score
+            result["match_confidence"] = self._map_score_to_confidence(score).name
+
+        # Add PEP-specific fields (FR19)
+        if self._is_pep_only(topics):
+            result["pep_status"] = "PEP - NOT CURRENTLY SANCTIONED"
+            result["due_diligence_note"] = "Enhanced due diligence recommended for PEPs"
+
+        return result
+
+    async def query(self, params: QueryParams) -> OSINTResult:
+        """Search for entities matching the query.
+
+        Args:
+            params: Query parameters with entity name in query field.
+
+        Returns:
+            OSINTResult with sanctions/PEP screening results.
+        """
+        # Implementation: use search_entity internally
+        return await self.search_entity(params.query)
+
+    async def search_entity(self, name: str) -> OSINTResult:
+        """Search for entity by name.
+
+        Args:
+            name: Entity name to search for.
+
+        Returns:
+            OSINTResult with matching entities.
+        """
+        # Implementation here...
+        pass
+
+    async def check_sanctions(self, entity_id: str) -> OSINTResult:
+        """Look up entity by OpenSanctions ID.
+
+        Args:
+            entity_id: OpenSanctions entity ID.
+
+        Returns:
+            OSINTResult with detailed entity information.
+        """
+        # Implementation here...
+        pass
+
+    def _build_result_from_cache(
+        self, query: str, cached_data: dict[str, Any]
+    ) -> OSINTResult:
+        """Build OSINTResult from cached data."""
+        # Implementation here...
+        pass
+
+    async def health_check(self) -> bool:
+        """Check if OpenSanctions API is reachable.
+
+        Returns:
+            True if API responds, False otherwise.
+        """
+        try:
+            client = await self._get_client()
+            response = await client.get(
+                f"{self.BASE_URL}/search/default",
+                params={"q": "test", "limit": 1},
+            )
+            return response.status_code == 200
+        except Exception as e:
+            logger.warning(f"OpenSanctions health check failed: {e}")
+            return False
+
+    async def close(self) -> None:
+        """Close the HTTP client."""
+        if self._client:
+            await self._client.aclose()
+            self._client = None
+            logger.debug("OpenSanctions adapter client closed")
+
+
+__all__ = ["OpenSanctionsAdapter"]
+      ]]>
+    </class-skeleton>
+
+    <test-requirements>
+      <test name="test_source_name">Verify source_name == "opensanctions"</test>
+      <test name="test_base_quality_tier_is_high">Verify base_quality_tier == QualityTier.HIGH</test>
+      <test name="test_query_success">Successful query returns normalized results with sanctions lists</test>
+      <test name="test_query_with_high_confidence_match">High-score match returns HIGH confidence</test>
+      <test name="test_query_with_medium_confidence_match">Medium-score match returns MEDIUM confidence</test>
+      <test name="test_search_entity_success">search_entity() method works</test>
+      <test name="test_check_sanctions_by_id">check_sanctions() looks up entity by ID</test>
+      <test name="test_multiple_sanctions_lists">Entity on multiple lists returns all lists</test>
+      <test name="test_pep_only_entity">PEP without sanctions returns appropriate status (FR19)</test>
+      <test name="test_pep_suggests_due_diligence">PEP result includes due diligence note</test>
+      <test name="test_query_no_match">Returns NO_DATA status with comprehensive search note</test>
+      <test name="test_query_rate_limited">Returns RATE_LIMITED on 429</test>
+      <test name="test_query_timeout">Raises AdapterTimeoutError on timeout</test>
+      <test name="test_query_malformed_response">Raises AdapterParseError on bad JSON</test>
+      <test name="test_health_check_success">Returns True when API responds</test>
+      <test name="test_health_check_failure">Returns False on connection error</test>
+      <test name="test_cache_hit">Cached results returned on second call</test>
+      <test name="test_results_include_entity_type">Response includes schema/entity type</test>
+      <test name="test_results_include_associated_entities">Response includes referents</test>
+      <test name="test_results_include_dates">Response includes first_seen/last_seen dates</test>
+    </test-requirements>
+
+    <fixture-examples>
+      <fixture name="opensanctions_entity.json">
+        <![CDATA[
+{
+  "responses": {
+    "q1": {
+      "query": {
+        "schema": "Person",
+        "properties": {"name": ["Viktor Vekselberg"]}
+      },
+      "total": {"value": 1, "relation": "eq"},
+      "results": [
+        {
+          "id": "NK-abc123",
+          "caption": "Viktor Vekselberg",
+          "schema": "Person",
+          "properties": {
+            "name": ["Viktor Vekselberg", "Viktor Feliksovich Vekselberg"],
+            "alias": ["Виктор Вексельберг"],
+            "birthDate": ["1957-04-14"],
+            "nationality": ["ru"],
+            "position": ["Businessman", "Chairman of Renova Group"],
+            "topics": ["sanction"]
+          },
+          "datasets": ["us_ofac_sdn", "eu_fsf", "ch_seco_sanctions"],
+          "referents": ["ofac-12345", "eu-123"],
+          "first_seen": "2018-04-06",
+          "last_seen": "2024-01-15",
+          "score": 0.98
+        }
+      ]
+    }
+  }
+}
+        ]]>
+      </fixture>
+
+      <fixture name="opensanctions_pep.json">
+        <![CDATA[
+{
+  "responses": {
+    "q1": {
+      "query": {
+        "schema": "Person",
+        "properties": {"name": ["Some Foreign Minister"]}
+      },
+      "total": {"value": 1, "relation": "eq"},
+      "results": [
+        {
+          "id": "pep-xyz789",
+          "caption": "Some Foreign Minister",
+          "schema": "Person",
+          "properties": {
+            "name": ["Some Foreign Minister"],
+            "nationality": ["de"],
+            "position": ["Foreign Minister"],
+            "topics": ["role.pep"]
+          },
+          "datasets": ["de_bundestag_pep"],
+          "referents": [],
+          "first_seen": "2020-01-01",
+          "last_seen": "2024-01-01",
+          "score": 0.95
+        }
+      ]
+    }
+  }
+}
+        ]]>
+      </fixture>
+
+      <fixture name="opensanctions_no_match.json">
+        <![CDATA[
+{
+  "responses": {
+    "q1": {
+      "query": {
+        "schema": "Person",
+        "properties": {"name": ["John Doe Nonexistent"]}
+      },
+      "total": {"value": 0, "relation": "eq"},
+      "results": []
+    }
+  }
+}
+        ]]>
+      </fixture>
+    </fixture-examples>
+
+    <exports-update>
+      <![CDATA[
+# In src/ignifer/adapters/__init__.py, add:
+
+from ignifer.adapters.opensanctions import OpenSanctionsAdapter
+
+# And update __all__:
+__all__ = [
+    # ... existing exports ...
+    "OpenSanctionsAdapter",
+]
+      ]]>
+    </exports-update>
+  </implementation-guidance>
+</story-context>

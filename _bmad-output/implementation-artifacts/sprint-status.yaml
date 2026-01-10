@@ -68,6 +68,9 @@ development_status:
   # Story 6.1: ACLED Adapter
   6-1-acled-adapter: done
 
+  # Story 6.2: OpenSanctions Adapter
+  6-2-opensanctions-adapter: done
+
   # Epic 7: Multi-Source Correlation
   epic-7: backlog
 

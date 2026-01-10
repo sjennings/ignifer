@@ -1,0 +1,31 @@
+{
+  "responses": {
+    "q1": {
+      "query": {
+        "schema": "Thing",
+        "properties": {"name": ["Viktor Vekselberg"]}
+      },
+      "total": {"value": 1, "relation": "eq"},
+      "results": [
+        {
+          "id": "NK-abc123",
+          "caption": "Viktor Vekselberg",
+          "schema": "Person",
+          "properties": {
+            "name": ["Viktor Vekselberg", "Viktor Feliksovich Vekselberg"],
+            "alias": ["Виктор Вексельберг"],
+            "birthDate": ["1957-04-14"],
+            "nationality": ["ru"],
+            "position": ["Businessman", "Chairman of Renova Group"],
+            "topics": ["sanction"]
+          },
+          "datasets": ["us_ofac_sdn", "eu_fsf", "ch_seco_sanctions"],
+          "referents": ["ofac-12345", "eu-123"],
+          "first_seen": "2018-04-06",
+          "last_seen": "2024-01-15",
+          "score": 0.98
+        }
+      ]
+    }
+  }
+}
