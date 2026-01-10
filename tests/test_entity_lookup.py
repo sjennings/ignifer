@@ -28,8 +28,8 @@ class TestEntityLookupTool:
         mock_resolution = EntityMatch(
             entity_id="Q102673",
             wikidata_qid="Q102673",
-            resolution_tier=ResolutionTier.EXACT,
-            match_confidence=1.0,
+            resolution_tier=ResolutionTier.WIKIDATA,
+            match_confidence=0.85,
             original_query="Gazprom",
             matched_label="Gazprom",
         )
@@ -90,8 +90,8 @@ class TestEntityLookupTool:
             assert "Russian state-controlled" in result
             assert "Saint Petersburg" in result
             assert "1989" in result
-            assert "Resolution: exact" in result
-            assert "confidence: 1.00" in result
+            assert "Resolution: wikidata" in result
+            assert "confidence: 0.85" in result
 
     @pytest.mark.asyncio
     async def test_entity_lookup_by_qid(self) -> None:
@@ -227,10 +227,8 @@ class TestEntityLookupTool:
             # Verify failure output
             assert "Entity Not Found" in result
             assert "xyznonexistent" in result
-            assert "Resolution attempted" in result
             assert "Suggestions" in result
             assert "spelling" in result
-            assert "Q-ID" in result  # Always suggests Q-ID
 
     @pytest.mark.asyncio
     async def test_entity_lookup_disambiguation(self) -> None:
@@ -400,97 +398,6 @@ class TestEntityLookupTool:
             assert "Suggestions" in result
             assert "name" in result  # Suggest trying by name
 
-    @pytest.mark.asyncio
-    async def test_entity_lookup_normalized_match(self) -> None:
-        """Normalized match includes correct resolution tier in output."""
-        mock_resolution = EntityMatch(
-            entity_id="Q7747",
-            wikidata_qid="Q7747",
-            resolution_tier=ResolutionTier.NORMALIZED,
-            match_confidence=0.95,
-            original_query="VLADIMIR PUTIN",
-            matched_label="Vladimir Putin",
-        )
-
-        mock_entity_data = {
-            "qid": "Q7747",
-            "label": "Vladimir Putin",
-            "description": "President of Russia",
-            "url": "https://www.wikidata.org/wiki/Q7747",
-        }
-
-        mock_wikidata_result = OSINTResult(
-            status=ResultStatus.SUCCESS,
-            query="Q7747",
-            results=[mock_entity_data],
-            sources=[],
-            retrieved_at=datetime.now(timezone.utc),
-        )
-
-        with (
-            patch("ignifer.server._get_entity_resolver") as mock_resolver_getter,
-            patch("ignifer.server._get_wikidata") as mock_wikidata_getter,
-        ):
-            mock_resolver = MagicMock()
-            mock_resolver.resolve = AsyncMock(return_value=mock_resolution)
-            mock_resolver_getter.return_value = mock_resolver
-
-            mock_wikidata = MagicMock()
-            mock_wikidata.lookup_by_qid = AsyncMock(return_value=mock_wikidata_result)
-            mock_wikidata_getter.return_value = mock_wikidata
-
-            result = await entity_lookup.fn(name="VLADIMIR PUTIN")
-
-            assert "Vladimir Putin" in result
-            assert "Resolution: normalized" in result
-            assert "confidence: 0.95" in result
-
-    @pytest.mark.asyncio
-    async def test_entity_lookup_fuzzy_match(self) -> None:
-        """Fuzzy match includes correct resolution tier and lower confidence."""
-        mock_resolution = EntityMatch(
-            entity_id="Q7747",
-            wikidata_qid="Q7747",
-            resolution_tier=ResolutionTier.FUZZY,
-            match_confidence=0.82,
-            original_query="Vladmir Putin",  # Typo
-            matched_label="Vladimir Putin",
-        )
-
-        mock_entity_data = {
-            "qid": "Q7747",
-            "label": "Vladimir Putin",
-            "description": "President of Russia",
-            "url": "https://www.wikidata.org/wiki/Q7747",
-        }
-
-        mock_wikidata_result = OSINTResult(
-            status=ResultStatus.SUCCESS,
-            query="Q7747",
-            results=[mock_entity_data],
-            sources=[],
-            retrieved_at=datetime.now(timezone.utc),
-        )
-
-        with (
-            patch("ignifer.server._get_entity_resolver") as mock_resolver_getter,
-            patch("ignifer.server._get_wikidata") as mock_wikidata_getter,
-        ):
-            mock_resolver = MagicMock()
-            mock_resolver.resolve = AsyncMock(return_value=mock_resolution)
-            mock_resolver_getter.return_value = mock_resolver
-
-            mock_wikidata = MagicMock()
-            mock_wikidata.lookup_by_qid = AsyncMock(return_value=mock_wikidata_result)
-            mock_wikidata_getter.return_value = mock_wikidata
-
-            result = await entity_lookup.fn(name="Vladmir Putin")
-
-            assert "Vladimir Putin" in result
-            assert "Resolution: fuzzy" in result
-            assert "confidence: 0.82" in result
-
-
 class TestEntityOutputFormatting:
     """Tests for entity output formatting."""
 
@@ -500,8 +407,8 @@ class TestEntityOutputFormatting:
         mock_resolution = EntityMatch(
             entity_id="Q102673",
             wikidata_qid="Q102673",
-            resolution_tier=ResolutionTier.EXACT,
-            match_confidence=1.0,
+            resolution_tier=ResolutionTier.WIKIDATA,
+            match_confidence=0.85,
             original_query="Gazprom",
             matched_label="Gazprom",
         )

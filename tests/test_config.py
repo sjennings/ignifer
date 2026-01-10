@@ -15,6 +15,13 @@ from ignifer.config import (
 )
 
 
+@pytest.fixture
+def no_config_file(monkeypatch: pytest.MonkeyPatch):
+    """Prevent loading credentials from config file."""
+    monkeypatch.setattr("ignifer.config._load_config_file", lambda *args, **kwargs: {})
+    yield
+
+
 class TestSettingsFromEnvironment:
     """Tests for loading settings from environment variables."""
 
@@ -48,7 +55,7 @@ class TestSettingsFromEnvironment:
         assert settings.aisstream_key is not None
         assert settings.aisstream_key.get_secret_value() == "aisstream_test_key"
 
-    def test_default_values_when_no_env(self) -> None:
+    def test_default_values_when_no_env(self, no_config_file) -> None:
         """Settings should have None for credentials when not set."""
         # Create settings with cleared environment
         with patch.dict(os.environ, {}, clear=True):
@@ -141,7 +148,7 @@ class TestCredentialHelperMethods:
         assert settings.has_opensky_credentials() is True
 
     def test_has_opensky_credentials_false_missing_password(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch, no_config_file
     ) -> None:
         """has_opensky_credentials returns False when password missing."""
         monkeypatch.setenv("IGNIFER_OPENSKY_CLIENT_ID", "user")
@@ -151,7 +158,7 @@ class TestCredentialHelperMethods:
         assert settings.has_opensky_credentials() is False
 
     def test_has_opensky_credentials_false_missing_username(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch, no_config_file
     ) -> None:
         """has_opensky_credentials returns False when username missing."""
         monkeypatch.setenv("IGNIFER_OPENSKY_CLIENT_SECRET", "pass")
@@ -160,7 +167,7 @@ class TestCredentialHelperMethods:
 
         assert settings.has_opensky_credentials() is False
 
-    def test_has_opensky_credentials_false_both_missing(self) -> None:
+    def test_has_opensky_credentials_false_both_missing(self, no_config_file) -> None:
         """has_opensky_credentials returns False when both missing."""
         with patch.dict(os.environ, {}, clear=True):
             settings = Settings()
@@ -176,7 +183,7 @@ class TestCredentialHelperMethods:
 
         assert settings.has_acled_credentials() is True
 
-    def test_has_acled_credentials_false(self) -> None:
+    def test_has_acled_credentials_false(self, no_config_file) -> None:
         """has_acled_credentials returns False when credentials are not set."""
         with patch.dict(os.environ, {}, clear=True):
             settings = Settings()
@@ -191,7 +198,7 @@ class TestCredentialHelperMethods:
 
         assert settings.has_aisstream_credentials() is True
 
-    def test_has_aisstream_credentials_false(self) -> None:
+    def test_has_aisstream_credentials_false(self, no_config_file) -> None:
         """has_aisstream_credentials returns False when key is not set."""
         with patch.dict(os.environ, {}, clear=True):
             settings = Settings()
@@ -304,7 +311,7 @@ class TestCredentialSecrecy:
         assert "secret_user" not in str_repr
         assert "secret_acled" not in str_repr
 
-    def test_repr_shows_none_for_unset_credentials(self) -> None:
+    def test_repr_shows_none_for_unset_credentials(self, no_config_file) -> None:
         """repr should show None for unset credentials."""
         with patch.dict(os.environ, {}, clear=True):
             settings = Settings()
@@ -390,7 +397,7 @@ ttl_opensky = 600
 class TestRigorModeSetting:
     """Tests for rigor_mode setting (Story 8.3, FR48)."""
 
-    def test_rigor_mode_default_false(self) -> None:
+    def test_rigor_mode_default_false(self, no_config_file) -> None:
         """Default rigor_mode should be False."""
         with patch.dict(os.environ, {}, clear=True):
             reset_settings()

@@ -87,9 +87,13 @@ class WikidataAdapter:
     async def _get_client(self) -> httpx.AsyncClient:
         """Lazy initialization of HTTP client."""
         if self._client is None:
+            # Wikimedia requires User-Agent with contact info per
+            # https://meta.wikimedia.org/wiki/User-Agent_policy
             self._client = httpx.AsyncClient(
                 timeout=httpx.Timeout(self.DEFAULT_TIMEOUT),
-                headers={"User-Agent": "Ignifer/1.0 (OSINT research tool)"},
+                headers={
+                    "User-Agent": "Ignifer/1.0 (https://github.com/ignifer/ignifer; ignifer@example.com)"
+                },
             )
         return self._client
 

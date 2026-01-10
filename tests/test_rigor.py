@@ -14,6 +14,15 @@ from unittest.mock import patch
 import pytest
 
 from ignifer.config import Settings, reset_settings
+
+
+@pytest.fixture
+def no_config_file(monkeypatch: pytest.MonkeyPatch):
+    """Prevent loading credentials from config file."""
+    monkeypatch.setattr("ignifer.config._load_config_file", lambda *args, **kwargs: {})
+    yield
+
+
 from ignifer.models import ConfidenceLevel, SourceMetadata
 from ignifer.rigor import (
     format_analytical_caveats,
@@ -67,7 +76,7 @@ class TestResolveRigorMode:
 
         assert result is False
 
-    def test_default_is_false(self) -> None:
+    def test_default_is_false(self, no_config_file) -> None:
         """Default global setting should be False."""
         reset_settings()
         # Clear any env var
@@ -376,7 +385,7 @@ class TestRigorModeConfigSetting:
 
         assert settings.rigor_mode is True
 
-    def test_rigor_mode_default_false(self) -> None:
+    def test_rigor_mode_default_false(self, no_config_file) -> None:
         """Default rigor_mode should be False."""
         with patch.dict(os.environ, {}, clear=True):
             reset_settings()

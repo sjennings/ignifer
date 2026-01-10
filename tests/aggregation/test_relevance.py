@@ -166,12 +166,14 @@ def engine_with_all_credentials(monkeypatch: pytest.MonkeyPatch) -> SourceReleva
 @pytest.fixture
 def engine_no_credentials(monkeypatch: pytest.MonkeyPatch) -> SourceRelevanceEngine:
     """Create engine with no optional credentials configured."""
-    # Clear any existing credentials
+    # Clear any existing credentials from environment
     monkeypatch.delenv("IGNIFER_OPENSKY_CLIENT_ID", raising=False)
     monkeypatch.delenv("IGNIFER_OPENSKY_CLIENT_SECRET", raising=False)
     monkeypatch.delenv("IGNIFER_AISSTREAM_KEY", raising=False)
     monkeypatch.delenv("IGNIFER_ACLED_EMAIL", raising=False)
     monkeypatch.delenv("IGNIFER_ACLED_PASSWORD", raising=False)
+    # Also prevent loading from config file
+    monkeypatch.setattr("ignifer.config._load_config_file", lambda *args, **kwargs: {})
     reset_settings()
     engine = SourceRelevanceEngine()
     yield engine

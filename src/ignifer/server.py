@@ -1173,14 +1173,12 @@ def _format_disambiguation(
 def _format_resolution_failure(
     query: str,
     suggestions: list[str],
-    tiers_attempted: list[str],
 ) -> str:
     """Format a failed resolution message with suggestions.
 
     Args:
         query: Original query string
         suggestions: List of suggestions from EntityResolver
-        tiers_attempted: List of resolution tiers that were tried
 
     Returns:
         Formatted error message with suggestions
@@ -1188,16 +1186,9 @@ def _format_resolution_failure(
     output = "## Entity Not Found\n\n"
     output += f'Could not find entity matching "{query}".\n\n'
 
-    output += "**Resolution attempted:**\n"
-    for tier in tiers_attempted:
-        output += f"- {tier.capitalize()} match: no match\n"
-
-    output += "\n**Suggestions:**\n"
+    output += "**Suggestions:**\n"
     for suggestion in suggestions:
         output += f"- {suggestion}\n"
-
-    # Always suggest Q-ID
-    output += '- Try using a Wikidata Q-ID if known (e.g., identifier="Q102673")\n'
 
     return output
 
@@ -1283,11 +1274,9 @@ async def entity_lookup(
 
         if not resolution.is_successful():
             # Resolution failed - return suggestions
-            tiers_attempted = ["exact", "normalized", "wikidata", "fuzzy"]
             return _format_resolution_failure(
                 query=name,
                 suggestions=resolution.suggestions,
-                tiers_attempted=tiers_attempted,
             )
 
         # Resolution succeeded - fetch full entity details
@@ -1319,7 +1308,6 @@ async def entity_lookup(
                     "Try checking the spelling",
                     "Try a more complete name",
                 ],
-                tiers_attempted=["exact", "normalized", "wikidata", "fuzzy"],
             )
 
         # Multiple results - show disambiguation

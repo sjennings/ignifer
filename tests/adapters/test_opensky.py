@@ -42,6 +42,8 @@ def clear_opensky_credentials(monkeypatch):
     """Ensure no OpenSky credentials are set."""
     monkeypatch.delenv("IGNIFER_OPENSKY_CLIENT_ID", raising=False)
     monkeypatch.delenv("IGNIFER_OPENSKY_CLIENT_SECRET", raising=False)
+    # Prevent loading credentials from config file
+    monkeypatch.setattr("ignifer.config._load_config_file", lambda *args, **kwargs: {})
     reset_settings()
     yield
     reset_settings()

@@ -41,6 +41,8 @@ def mock_aisstream_credentials(monkeypatch):
 def clear_aisstream_credentials(monkeypatch):
     """Ensure no AISStream credentials are set."""
     monkeypatch.delenv("IGNIFER_AISSTREAM_KEY", raising=False)
+    # Prevent loading credentials from config file
+    monkeypatch.setattr("ignifer.config._load_config_file", lambda *args, **kwargs: {})
     reset_settings()
     yield
     reset_settings()

@@ -42,6 +42,8 @@ def clear_acled_credentials(monkeypatch):
     """Ensure no ACLED credentials are set."""
     monkeypatch.delenv("IGNIFER_ACLED_EMAIL", raising=False)
     monkeypatch.delenv("IGNIFER_ACLED_PASSWORD", raising=False)
+    # Prevent loading credentials from config file
+    monkeypatch.setattr("ignifer.config._load_config_file", lambda *args, **kwargs: {})
     reset_settings()
     yield
     reset_settings()
