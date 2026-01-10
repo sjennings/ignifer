@@ -1,0 +1,882 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<story-context story-id="6.1" title="ACLED Adapter">
+  <metadata>
+    <generated>2026-01-09</generated>
+    <story-file>_bmad-output/implementation-artifacts/6-1-acled-adapter.md</story-file>
+    <epic>Epic 6 - Conflict &amp; Security Analysis</epic>
+    <priority>High</priority>
+    <complexity>Medium</complexity>
+    <dependencies>Stories 1.3 (Cache), 1.4 (Adapter Protocol), 4.1 (API Key Config)</dependencies>
+  </metadata>
+
+  <project-rules>
+    <critical-rules title="Absolute Must-Knows from project-context.md">
+      <rule id="1">snake_case for all JSON fields - no exceptions</rule>
+      <rule id="2">datetime.now(timezone.utc) - never naive datetime</rule>
+      <rule id="3">Adapter-owned httpx clients - never shared across adapters</rule>
+      <rule id="4">stdlib logging only - no loguru, no structlog</rule>
+      <rule id="5">{Source}Adapter naming - class must be ACLEDAdapter</rule>
+      <rule id="6">Hybrid error handling - exceptions for unexpected, Result type for expected</rule>
+      <rule id="7">ISO 8601 + timezone for all datetime serialization</rule>
+      <rule id="8">Layer rule: Adapters MUST NOT import from server.py or tools</rule>
+    </critical-rules>
+
+    <error-handling-contract>
+      <scenario type="Network timeout">AdapterTimeoutError (Exception)</scenario>
+      <scenario type="Rate limited">OSINTResult(status=RATE_LIMITED) (Result type)</scenario>
+      <scenario type="No data found">OSINTResult(status=NO_DATA) (Result type)</scenario>
+      <scenario type="Malformed response">AdapterParseError (Exception)</scenario>
+      <scenario type="Auth failure (invalid key)">AdapterAuthError (Exception)</scenario>
+      <scenario type="Missing API key">OSINTResult with error message (Result type)</scenario>
+    </error-handling-contract>
+
+    <cache-rules>
+      <key-format>{adapter}:{query_type}:{params_hash}</key-format>
+      <acled-ttl>43200 seconds (12 hours)</acled-ttl>
+      <note>Always close CacheManager - SQLite WAL connections will hang process on exit if not closed</note>
+    </cache-rules>
+
+    <logging-rules>
+      <pattern>logging.getLogger(__name__)</pattern>
+      <levels>DEBUG (verbose), INFO (operations), WARNING (recoverable), ERROR (failures)</levels>
+    </logging-rules>
+  </project-rules>
+
+  <adapter-protocol>
+    <file-path>src/ignifer/adapters/base.py</file-path>
+    <protocol-definition><![CDATA[
+@runtime_checkable
+class OSINTAdapter(Protocol):
+    """Protocol for all OSINT data source adapters.
+
+    All adapters MUST implement this protocol. The @runtime_checkable
+    decorator enables isinstance() checks without explicit inheritance.
+
+    Error Handling Contract:
+    - AdapterTimeoutError: Network timeouts (unexpected)
+    - AdapterParseError: Malformed API responses (unexpected)
+    - AdapterAuthError: Authentication failures (unexpected)
+    - OSINTResult(status=RateLimited): Rate limiting (expected)
+    - OSINTResult(status=NoData): No results found (expected)
+    """
+
+    @property
+    def source_name(self) -> str:
+        """Unique identifier for this data source (e.g., 'gdelt', 'opensky')."""
+        ...
+
+    @property
+    def base_quality_tier(self) -> QualityTier:
+        """Default quality tier for this source's data."""
+        ...
+
+    async def query(self, params: QueryParams) -> OSINTResult:
+        """Execute a query against this data source."""
+        ...
+
+    async def health_check(self) -> bool:
+        """Check if the data source is reachable and responding."""
+        ...
+]]></protocol-definition>
+
+    <error-classes><![CDATA[
+class AdapterError(Exception):
+    """Base exception for all adapter errors."""
+    def __init__(self, source_name: str, message: str) -> None:
+        self.source_name = source_name
+        self.message = message
+        super().__init__(f"[{source_name}] {message}")
+
+class AdapterTimeoutError(AdapterError):
+    """Raised when an adapter request times out."""
+    def __init__(self, source_name: str, timeout_seconds: float | None = None) -> None:
+        msg = "Request timed out"
+        if timeout_seconds is not None:
+            msg = f"Request timed out after {timeout_seconds}s"
+        super().__init__(source_name, msg)
+        self.timeout_seconds = timeout_seconds
+
+class AdapterParseError(AdapterError):
+    """Raised when an API response cannot be parsed."""
+    def __init__(self, source_name: str, details: str | None = None) -> None:
+        msg = "Failed to parse API response"
+        if details:
+            msg = f"Failed to parse API response: {details}"
+        super().__init__(source_name, msg)
+        self.details = details
+
+class AdapterAuthError(AdapterError):
+    """Raised when authentication fails."""
+    def __init__(self, source_name: str, details: str | None = None) -> None:
+        msg = "Authentication failed"
+        if details:
+            msg = f"Authentication failed: {details}"
+        super().__init__(source_name, msg)
+        self.details = details
+]]></error-classes>
+  </adapter-protocol>
+
+  <reference-implementations>
+    <adapter name="gdelt" purpose="Basic adapter structure without auth">
+      <file-path>src/ignifer/adapters/gdelt.py</file-path>
+      <key-patterns><![CDATA[
+# Class structure
+class GDELTAdapter:
+    BASE_URL = "https://api.gdeltproject.org/api/v2/doc/doc"
+    DEFAULT_TIMEOUT = 10.0  # seconds
+
+    def __init__(self, cache: CacheManager | None = None) -> None:
+        self._client: httpx.AsyncClient | None = None
+        self._cache = cache
+
+    @property
+    def source_name(self) -> str:
+        return "gdelt"
+
+    @property
+    def base_quality_tier(self) -> QualityTier:
+        return QualityTier.MEDIUM
+
+    async def _get_client(self) -> httpx.AsyncClient:
+        """Lazy initialization of HTTP client."""
+        if self._client is None:
+            self._client = httpx.AsyncClient(
+                timeout=httpx.Timeout(self.DEFAULT_TIMEOUT),
+                headers={"User-Agent": "Ignifer/1.0"},
+            )
+        return self._client
+
+    async def close(self) -> None:
+        """Close the HTTP client."""
+        if self._client:
+            await self._client.aclose()
+            self._client = None
+            logger.debug("GDELT adapter client closed")
+
+# Cache pattern
+key = cache_key(self.source_name, "articles", search_query=f"{params.query}:{timespan}")
+if self._cache:
+    cached = await self._cache.get(key)
+    if cached and cached.data and not cached.is_stale:
+        logger.debug(f"Cache hit for {key}")
+        # Reconstruct OSINTResult from cached data
+        ...
+
+# Caching results
+if self._cache:
+    settings = get_settings()
+    await self._cache.set(
+        key=key,
+        data={"articles": articles},
+        ttl_seconds=settings.ttl_gdelt,
+        source=self.source_name,
+    )
+
+# Building OSINTResult
+return OSINTResult(
+    status=ResultStatus.SUCCESS,
+    query=params.query,
+    results=articles,
+    sources=[
+        SourceAttribution(
+            source=self.source_name,
+            quality=self.base_quality_tier,
+            confidence=ConfidenceLevel.LIKELY,
+            metadata=SourceMetadata(
+                source_name=self.source_name,
+                source_url=url,
+                retrieved_at=retrieved_at,
+            ),
+        )
+    ],
+    retrieved_at=retrieved_at,
+)
+
+# No data result
+return OSINTResult(
+    status=ResultStatus.NO_DATA,
+    query=params.query,
+    results=[],
+    sources=[],
+    retrieved_at=datetime.now(timezone.utc),
+    error="No articles found. Try broader search terms or different keywords.",
+)
+]]></key-patterns>
+    </adapter>
+
+    <adapter name="opensky" purpose="API key authentication pattern">
+      <file-path>src/ignifer/adapters/opensky.py</file-path>
+      <auth-patterns><![CDATA[
+# Credential retrieval
+def _get_auth(self) -> tuple[str, str] | None:
+    """Get Basic Auth credentials from settings."""
+    settings = get_settings()
+    if not settings.has_opensky_credentials():
+        return None
+    username = settings.opensky_username.get_secret_value()
+    password = settings.opensky_password.get_secret_value()
+    return (username, password)
+
+# Auth check in client initialization
+async def _get_client(self) -> httpx.AsyncClient:
+    """Lazy initialization of HTTP client with Basic Auth."""
+    if self._client is None:
+        auth = self._get_auth()
+        if auth is None:
+            settings = get_settings()
+            raise AdapterAuthError(
+                self.source_name, settings.get_credential_error_message("opensky")
+            )
+        self._client = httpx.AsyncClient(
+            timeout=httpx.Timeout(self.DEFAULT_TIMEOUT),
+            headers={"User-Agent": "Ignifer/1.0"},
+            auth=auth,
+        )
+    return self._client
+
+# 401/403 handling
+if response.status_code == 401:
+    raise AdapterAuthError(self.source_name, "Invalid credentials")
+
+if response.status_code == 429:
+    return OSINTResult(
+        status=ResultStatus.RATE_LIMITED,
+        query=query,
+        results=[],
+        sources=[],
+        retrieved_at=datetime.now(timezone.utc),
+    )
+]]></auth-patterns>
+    </adapter>
+
+    <adapter name="aisstream" purpose="Recent adapter with similar API key pattern">
+      <file-path>src/ignifer/adapters/aisstream.py</file-path>
+      <api-key-pattern><![CDATA[
+# Single API key retrieval (ACLED uses similar pattern)
+def _get_api_key(self) -> str:
+    """Get API key from settings."""
+    settings = get_settings()
+    if not settings.has_aisstream_credentials():
+        raise AdapterAuthError(
+            self.source_name, settings.get_credential_error_message("aisstream")
+        )
+    return settings.aisstream_key.get_secret_value()
+]]></api-key-pattern>
+    </adapter>
+
+    <adapter name="worldbank" purpose="Query parsing and result normalization">
+      <file-path>src/ignifer/adapters/worldbank.py</file-path>
+      <parsing-patterns><![CDATA[
+# Result normalization to flat dict structure
+results: list[dict[str, str | int | float | bool | None]] = []
+for record in records:
+    if record.get("value") is not None:
+        results.append({
+            "indicator": record.get("indicator", {}).get("value", ""),
+            "country": record.get("country", {}).get("value", ""),
+            "year": record.get("date", ""),
+            "value": record.get("value"),
+        })
+]]></parsing-patterns>
+    </adapter>
+  </reference-implementations>
+
+  <configuration>
+    <file-path>src/ignifer/config.py</file-path>
+    <acled-config><![CDATA[
+# Error message already defined
+_CREDENTIAL_ERROR_MESSAGES: dict[str, str] = {
+    "acled": (
+        "ACLED requires an API key. "
+        "Set IGNIFER_ACLED_KEY environment variable, "
+        "or configure acled_key in ~/.config/ignifer/config.toml"
+    ),
+}
+
+class Settings(BaseSettings):
+    # ACLED API key (SecretStr for security)
+    acled_key: SecretStr | None = None
+
+    # Cache TTL for ACLED
+    ttl_acled: int = 43200  # 12 hours
+
+    def has_acled_credentials(self) -> bool:
+        """Check if ACLED API key is configured."""
+        return bool(self.acled_key)
+
+    @staticmethod
+    def get_credential_error_message(source: str) -> str:
+        """Get a helpful error message for missing credentials."""
+        ...
+]]></acled-config>
+    <usage-note>
+      ACLED API key configuration is ALREADY IMPLEMENTED in config.py.
+      Use: settings.has_acled_credentials() to check
+      Use: settings.acled_key.get_secret_value() to retrieve
+      Use: settings.get_credential_error_message("acled") for error message
+    </usage-note>
+  </configuration>
+
+  <cache-integration>
+    <file-path>src/ignifer/cache.py</file-path>
+    <cache-key-function><![CDATA[
+def cache_key(adapter: str, query: str, **params: Any) -> str:
+    """Deterministic cache key generation.
+
+    Format: {adapter}:{query}:{params_hash}
+    Hash is first 12 chars of SHA256 of sorted JSON params.
+    """
+    sorted_params = sorted(params.items())
+    params_hash = hashlib.sha256(json.dumps(sorted_params, sort_keys=True).encode()).hexdigest()[:12]
+    return f"{adapter}:{query}:{params_hash}"
+]]></cache-key-function>
+    <cache-manager-usage><![CDATA[
+# Check cache
+if self._cache:
+    cached = await self._cache.get(key)
+    if cached and cached.data and not cached.is_stale:
+        logger.debug(f"Cache hit for {key}")
+        return self._build_result_from_cache(query, cached.data)
+
+# Store in cache
+if self._cache:
+    settings = get_settings()
+    await self._cache.set(
+        key=key,
+        data={"events": events},
+        ttl_seconds=settings.ttl_acled,  # 43200 = 12 hours
+        source=self.source_name,
+    )
+]]></cache-manager-usage>
+  </cache-integration>
+
+  <models>
+    <file-path>src/ignifer/models.py</file-path>
+    <relevant-models><![CDATA[
+class QualityTier(Enum):
+    HIGH = "H"   # Official sources, academic research
+    MEDIUM = "M" # Reputable news, verified OSINT
+    LOW = "L"    # Social media, unverified reports
+
+class ResultStatus(Enum):
+    SUCCESS = "success"
+    NO_DATA = "no_data"
+    RATE_LIMITED = "rate_limited"
+    ERROR = "error"
+
+class ConfidenceLevel(Enum):
+    REMOTE = 1        # <20%
+    UNLIKELY = 2      # 20-40%
+    EVEN_CHANCE = 3   # 40-60%
+    LIKELY = 4        # 60-80%
+    VERY_LIKELY = 5   # 80-95%
+    ALMOST_CERTAIN = 6 # >95%
+
+class OSINTResult(BaseModel):
+    status: ResultStatus
+    query: str
+    results: list[dict[str, str | int | float | bool | None]]
+    sources: list[SourceAttribution]
+    retrieved_at: datetime
+    error: str | None = None
+]]></relevant-models>
+    <note>ACLED uses QualityTier.HIGH - academic research quality conflict data</note>
+  </models>
+
+  <test-patterns>
+    <test-file-location>tests/adapters/test_acled.py</test-file-location>
+    <fixture-location>tests/fixtures/acled_events.json</fixture-location>
+
+    <test-structure><![CDATA[
+"""Tests for ACLED adapter."""
+
+import json
+import re
+from pathlib import Path
+
+import httpx
+import pytest
+
+from ignifer.adapters.acled import ACLEDAdapter
+from ignifer.adapters.base import AdapterAuthError, AdapterParseError, AdapterTimeoutError
+from ignifer.config import reset_settings
+from ignifer.models import QualityTier, QueryParams, ResultStatus
+
+
+def load_fixture(name: str) -> dict:
+    """Load JSON fixture file."""
+    fixture_path = Path(__file__).parent.parent / "fixtures" / name
+    return json.loads(fixture_path.read_text())
+
+
+@pytest.fixture(autouse=True)
+def reset_settings_fixture():
+    """Reset settings singleton before each test."""
+    reset_settings()
+    yield
+    reset_settings()
+
+
+@pytest.fixture
+def mock_acled_credentials(monkeypatch):
+    """Set mock ACLED credentials in environment."""
+    monkeypatch.setenv("IGNIFER_ACLED_KEY", "test_acled_key_12345")
+    monkeypatch.setenv("IGNIFER_ACLED_EMAIL", "test@example.com")  # If email is required
+    reset_settings()
+    yield
+    reset_settings()
+
+
+@pytest.fixture
+def clear_acled_credentials(monkeypatch):
+    """Ensure no ACLED credentials are set."""
+    monkeypatch.delenv("IGNIFER_ACLED_KEY", raising=False)
+    reset_settings()
+    yield
+    reset_settings()
+]]></test-structure>
+
+    <test-patterns-from-opensky><![CDATA[
+# Test source_name property
+def test_source_name(self, mock_acled_credentials) -> None:
+    adapter = ACLEDAdapter()
+    assert adapter.source_name == "acled"
+
+# Test quality tier
+def test_base_quality_tier(self, mock_acled_credentials) -> None:
+    adapter = ACLEDAdapter()
+    assert adapter.base_quality_tier == QualityTier.HIGH
+
+# Test successful query with mocked response
+@pytest.mark.asyncio
+async def test_query_success(self, httpx_mock, mock_acled_credentials) -> None:
+    httpx_mock.add_response(
+        url=re.compile(r".*api\.acleddata\.com.*"),
+        json=load_fixture("acled_events.json"),
+    )
+    adapter = ACLEDAdapter()
+    result = await adapter.query(QueryParams(query="Burkina Faso"))
+    assert result.status == ResultStatus.SUCCESS
+    # ... assertions
+    await adapter.close()
+
+# Test missing credentials
+@pytest.mark.asyncio
+async def test_no_credentials_returns_error(self, clear_acled_credentials) -> None:
+    adapter = ACLEDAdapter()
+    result = await adapter.query(QueryParams(query="Syria"))
+    # ACLED should return result with error, not raise exception
+    # (based on story AC4: returns clear error explaining registration requirement)
+    assert result.status == ResultStatus.NO_DATA or result.error is not None
+    assert "ACLED" in str(result.error)
+    await adapter.close()
+
+# Test rate limiting
+@pytest.mark.asyncio
+async def test_rate_limited_returns_rate_limited_status(self, httpx_mock, mock_acled_credentials) -> None:
+    httpx_mock.add_response(
+        url=re.compile(r".*api\.acleddata\.com.*"),
+        status_code=429,
+    )
+    adapter = ACLEDAdapter()
+    result = await adapter.query(QueryParams(query="Syria"))
+    assert result.status == ResultStatus.RATE_LIMITED
+    await adapter.close()
+
+# Test timeout
+@pytest.mark.asyncio
+async def test_timeout_raises_timeout_error(self, httpx_mock, mock_acled_credentials) -> None:
+    httpx_mock.add_exception(
+        httpx.TimeoutException("Connection timed out"),
+        url=re.compile(r".*api\.acleddata\.com.*"),
+    )
+    adapter = ACLEDAdapter()
+    with pytest.raises(AdapterTimeoutError):
+        await adapter.query(QueryParams(query="Syria"))
+    await adapter.close()
+
+# Test cache hit
+@pytest.mark.asyncio
+@pytest.mark.httpx_mock(can_send_already_matched_responses=True)
+async def test_cache_hit(self, httpx_mock, mock_acled_credentials, tmp_path) -> None:
+    from ignifer.cache import CacheManager, MemoryCache, SQLiteCache
+    db_path = tmp_path / "test_cache.db"
+    cache = CacheManager(l1=MemoryCache(), l2=SQLiteCache(db_path=db_path))
+    # ... test pattern from test_opensky.py
+    await cache.close()
+]]></test-patterns-from-opensky>
+  </test-patterns>
+
+  <acled-api-reference>
+    <base-url>https://api.acleddata.com/acled/read</base-url>
+    <authentication>API key + email as query parameters</authentication>
+    <registration-url>https://acleddata.com/register/</registration-url>
+
+    <query-parameters>
+      <param name="key">API key (required)</param>
+      <param name="email">Registered email (required)</param>
+      <param name="country">Country name or ISO code</param>
+      <param name="event_date">Date filter (e.g., 2024-01-01|2024-12-31)</param>
+      <param name="event_type">Filter by event type</param>
+      <param name="limit">Number of results (default 500, max 10000)</param>
+    </query-parameters>
+
+    <event-types>
+      <type>Battles</type>
+      <type>Violence against civilians</type>
+      <type>Explosions/Remote violence</type>
+      <type>Protests</type>
+      <type>Riots</type>
+      <type>Strategic developments</type>
+    </event-types>
+
+    <actor-categories>
+      <category>State forces</category>
+      <category>Rebel groups</category>
+      <category>Political militias</category>
+      <category>Ethnic militias</category>
+      <category>Identity militias</category>
+      <category>External/other forces</category>
+      <category>Civilians</category>
+    </actor-categories>
+
+    <sample-response><![CDATA[
+{
+  "status": 200,
+  "success": true,
+  "count": 100,
+  "data": [
+    {
+      "data_id": "10000001",
+      "event_id_cnty": "BFA2024",
+      "event_date": "2024-01-15",
+      "year": 2024,
+      "event_type": "Battles",
+      "sub_event_type": "Armed clash",
+      "actor1": "Military Forces of Burkina Faso (2022-)",
+      "actor2": "JNIM: Jama'at Nasr al-Islam wal Muslimin",
+      "country": "Burkina Faso",
+      "admin1": "Sahel",
+      "admin2": "Soum",
+      "location": "Djibo",
+      "latitude": 14.1,
+      "longitude": -1.63,
+      "fatalities": 12,
+      "notes": "Military clashed with JNIM militants...",
+      "source": "AFP",
+      "source_scale": "International"
+    }
+  ]
+}
+]]></sample-response>
+  </acled-api-reference>
+
+  <implementation-guidance>
+    <file-structure>
+      <new-file>src/ignifer/adapters/acled.py</new-file>
+      <new-file>tests/adapters/test_acled.py</new-file>
+      <new-file>tests/fixtures/acled_events.json</new-file>
+      <modify-file>src/ignifer/adapters/__init__.py - Add ACLEDAdapter export</modify-file>
+    </file-structure>
+
+    <class-skeleton><![CDATA[
+"""ACLED adapter for conflict event data.
+
+ACLED (Armed Conflict Location & Event Data) provides comprehensive
+conflict event data compiled from reports and local sources.
+
+API Reference: https://acleddata.com/resources/api-documentation/
+"""
+
+import logging
+from datetime import datetime, timezone
+from typing import Any
+
+import httpx
+
+from ignifer.adapters.base import AdapterAuthError, AdapterParseError, AdapterTimeoutError
+from ignifer.cache import CacheManager, cache_key
+from ignifer.config import get_settings
+from ignifer.models import (
+    ConfidenceLevel,
+    OSINTResult,
+    QualityTier,
+    QueryParams,
+    ResultStatus,
+    SourceAttribution,
+    SourceMetadata,
+)
+
+logger = logging.getLogger(__name__)
+
+
+class ACLEDAdapter:
+    """ACLED adapter for conflict event data.
+
+    Provides access to conflict event data including battles, violence
+    against civilians, protests, and strategic developments.
+    Requires API key registration at https://acleddata.com/register/
+
+    Attributes:
+        source_name: "acled"
+        base_quality_tier: QualityTier.HIGH (academic research quality)
+    """
+
+    BASE_URL = "https://api.acleddata.com/acled/read"
+    DEFAULT_TIMEOUT = 15.0  # seconds
+
+    def __init__(self, cache: CacheManager | None = None) -> None:
+        """Initialize the ACLED adapter."""
+        self._client: httpx.AsyncClient | None = None
+        self._cache = cache
+
+    @property
+    def source_name(self) -> str:
+        return "acled"
+
+    @property
+    def base_quality_tier(self) -> QualityTier:
+        return QualityTier.HIGH
+
+    def _get_api_key(self) -> str | None:
+        """Get API key from settings. Returns None if not configured."""
+        settings = get_settings()
+        if not settings.has_acled_credentials():
+            return None
+        return settings.acled_key.get_secret_value()
+
+    async def _get_client(self) -> httpx.AsyncClient:
+        """Lazy initialization of HTTP client."""
+        if self._client is None:
+            self._client = httpx.AsyncClient(
+                timeout=httpx.Timeout(self.DEFAULT_TIMEOUT),
+                headers={"User-Agent": "Ignifer/1.0"},
+            )
+        return self._client
+
+    async def query(self, params: QueryParams) -> OSINTResult:
+        """Query ACLED for conflict events."""
+        # Check credentials first - return helpful error if missing
+        api_key = self._get_api_key()
+        if api_key is None:
+            settings = get_settings()
+            return OSINTResult(
+                status=ResultStatus.NO_DATA,
+                query=params.query,
+                results=[],
+                sources=[],
+                retrieved_at=datetime.now(timezone.utc),
+                error=settings.get_credential_error_message("acled"),
+            )
+
+        # Implementation continues...
+        ...
+
+    async def get_events(self, country: str, date_range: str | None = None) -> OSINTResult:
+        """Get conflict events for a specific country."""
+        ...
+
+    async def health_check(self) -> bool:
+        """Check if ACLED API is reachable."""
+        ...
+
+    async def close(self) -> None:
+        """Close the HTTP client."""
+        if self._client:
+            await self._client.aclose()
+            self._client = None
+            logger.debug("ACLED adapter client closed")
+]]></class-skeleton>
+
+    <result-normalization-guidance>
+      <note>Results must be flat dicts with scalar values only (no nested dicts)</note>
+      <suggested-fields>
+        <field name="event_id">data_id from API</field>
+        <field name="event_date">event_date from API (string, ISO format)</field>
+        <field name="event_type">event_type from API</field>
+        <field name="sub_event_type">sub_event_type from API</field>
+        <field name="actor1">actor1 from API</field>
+        <field name="actor2">actor2 from API</field>
+        <field name="country">country from API</field>
+        <field name="admin1">admin1 (region) from API</field>
+        <field name="admin2">admin2 (subregion) from API</field>
+        <field name="location">location from API</field>
+        <field name="latitude">latitude from API</field>
+        <field name="longitude">longitude from API</field>
+        <field name="fatalities">fatalities count from API</field>
+        <field name="notes">notes from API</field>
+        <field name="source">source from API</field>
+        <field name="source_scale">source_scale from API</field>
+      </suggested-fields>
+    </result-normalization-guidance>
+
+    <summary-generation-guidance>
+      <note>query() should return aggregated summary in results, not raw events</note>
+      <suggested-summary-fields>
+        <field name="total_events">Count of events in period</field>
+        <field name="date_range_start">Start of analyzed period</field>
+        <field name="date_range_end">End of analyzed period</field>
+        <field name="event_type_breakdown">Dict of event_type to count</field>
+        <field name="top_actors">List of most active actors</field>
+        <field name="total_fatalities">Sum of fatalities</field>
+        <field name="affected_regions">List of admin1 regions with events</field>
+      </suggested-summary-fields>
+      <note>Since OSINTResult.results only supports flat dicts, consider returning summary as first result item with flattened fields like event_type_battles, event_type_protests, etc.</note>
+    </summary-generation-guidance>
+
+    <date-range-parsing>
+      <note>Use ignifer.timeparse.parse_time_range if available, otherwise implement simple parsing</note>
+      <examples>
+        <example input="last 30 days">Calculate start date as now - 30 days</example>
+        <example input="2024-01-01 to 2024-12-31">Parse as explicit date range</example>
+      </examples>
+      <acled-date-format>YYYY-MM-DD|YYYY-MM-DD (pipe-separated start|end)</acled-date-format>
+    </date-range-parsing>
+
+    <adapters-init-update><![CDATA[
+# Add to src/ignifer/adapters/__init__.py:
+from ignifer.adapters.acled import ACLEDAdapter
+
+__all__ = [
+    ...
+    "ACLEDAdapter",
+    ...
+]
+]]></adapters-init-update>
+  </implementation-guidance>
+
+  <testing-requirements>
+    <coverage-target>Minimum 80% coverage on src/ignifer/adapters/acled.py</coverage-target>
+
+    <required-tests>
+      <test name="test_source_name">Verify source_name == "acled"</test>
+      <test name="test_base_quality_tier_is_high">Verify base_quality_tier == QualityTier.HIGH</test>
+      <test name="test_query_success">Successful query returns normalized results</test>
+      <test name="test_query_with_date_range">Date range filtering works</test>
+      <test name="test_get_events_returns_events">get_events() method works</test>
+      <test name="test_query_no_api_key">Returns helpful error when key not configured</test>
+      <test name="test_query_invalid_api_key">Handles 401/403 auth errors</test>
+      <test name="test_query_no_data">Returns NO_DATA status for regions with no events</test>
+      <test name="test_query_rate_limited">Returns RATE_LIMITED on 429</test>
+      <test name="test_query_timeout">Raises AdapterTimeoutError on timeout</test>
+      <test name="test_query_malformed_response">Raises AdapterParseError on bad JSON</test>
+      <test name="test_health_check_success">Returns True when API responds</test>
+      <test name="test_health_check_failure">Returns False on connection error</test>
+      <test name="test_cache_hit">Cached results returned on second call</test>
+      <test name="test_results_include_event_types">Response includes event type breakdown</test>
+      <test name="test_results_include_actors">Response includes actor categories</test>
+      <test name="test_results_include_fatalities">Response includes fatality counts</test>
+    </required-tests>
+
+    <fixture-template><![CDATA[
+{
+  "status": 200,
+  "success": true,
+  "count": 3,
+  "data": [
+    {
+      "data_id": "10000001",
+      "event_id_cnty": "BFA2024001",
+      "event_date": "2024-01-15",
+      "year": 2024,
+      "event_type": "Battles",
+      "sub_event_type": "Armed clash",
+      "actor1": "Military Forces of Burkina Faso (2022-)",
+      "actor2": "JNIM: Jama'at Nasr al-Islam wal Muslimin",
+      "country": "Burkina Faso",
+      "admin1": "Sahel",
+      "admin2": "Soum",
+      "location": "Djibo",
+      "latitude": 14.1,
+      "longitude": -1.63,
+      "fatalities": 12,
+      "notes": "Military forces clashed with JNIM militants near Djibo.",
+      "source": "AFP",
+      "source_scale": "International"
+    },
+    {
+      "data_id": "10000002",
+      "event_id_cnty": "BFA2024002",
+      "event_date": "2024-01-16",
+      "year": 2024,
+      "event_type": "Violence against civilians",
+      "sub_event_type": "Attack",
+      "actor1": "JNIM: Jama'at Nasr al-Islam wal Muslimin",
+      "actor2": "Civilians (Burkina Faso)",
+      "country": "Burkina Faso",
+      "admin1": "Nord",
+      "admin2": "Yatenga",
+      "location": "Ouahigouya",
+      "latitude": 13.58,
+      "longitude": -2.42,
+      "fatalities": 5,
+      "notes": "JNIM militants attacked village residents.",
+      "source": "Local Media",
+      "source_scale": "Subnational"
+    },
+    {
+      "data_id": "10000003",
+      "event_id_cnty": "BFA2024003",
+      "event_date": "2024-01-17",
+      "year": 2024,
+      "event_type": "Protests",
+      "sub_event_type": "Peaceful protest",
+      "actor1": "Protesters (Burkina Faso)",
+      "actor2": "",
+      "country": "Burkina Faso",
+      "admin1": "Centre",
+      "admin2": "Kadiogo",
+      "location": "Ouagadougou",
+      "latitude": 12.37,
+      "longitude": -1.52,
+      "fatalities": 0,
+      "notes": "Peaceful protest in capital against security situation.",
+      "source": "Reuters",
+      "source_scale": "International"
+    }
+  ]
+}
+]]></fixture-template>
+  </testing-requirements>
+
+  <acceptance-criteria-checklist>
+    <ac id="1" title="ACLEDAdapter Class Created">
+      <check>Implements OSINTAdapter protocol</check>
+      <check>source_name = "acled"</check>
+      <check>base_quality_tier = QualityTier.HIGH</check>
+      <check>Creates adapter-owned httpx.AsyncClient</check>
+      <check>Implements async query(params: QueryParams) -> OSINTResult</check>
+      <check>Implements async get_events(country: str, date_range: str = None) -> OSINTResult</check>
+      <check>Implements async health_check() -> bool</check>
+    </ac>
+    <ac id="2" title="Conflict Event Queries Work">
+      <check>Queries ACLED API for conflict events</check>
+      <check>Returns OSINTResult with event data</check>
+      <check>Includes event count and date range</check>
+      <check>Includes event types breakdown</check>
+      <check>Includes actor categories</check>
+      <check>Includes fatality counts and trends</check>
+      <check>Includes geographic distribution</check>
+      <check>Results cached with 12-hour TTL</check>
+    </ac>
+    <ac id="3" title="Date Range Filtering Works">
+      <check>Parses date_range string like "last 30 days"</check>
+      <check>Filters events to specified period</check>
+      <check>Includes trend comparison if available</check>
+    </ac>
+    <ac id="4" title="Missing API Key Error Handling">
+      <check>Returns clear error when API key not configured</check>
+      <check>Error explains ACLED registration requirement</check>
+      <check>Provides link to ACLED access registration</check>
+    </ac>
+    <ac id="5" title="No Data Handling">
+      <check>Returns OSINTResult with status=NO_DATA</check>
+      <check>Notes peaceful conditions or data coverage gap</check>
+    </ac>
+    <ac id="6" title="Tests Pass with Mocked Responses">
+      <check>Test fixtures exist in tests/fixtures/acled_events.json</check>
+      <check>All tests pass using mocked HTTP responses</check>
+      <check>80% minimum coverage achieved</check>
+    </ac>
+  </acceptance-criteria-checklist>
+</story-context>
