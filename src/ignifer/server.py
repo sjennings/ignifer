@@ -79,6 +79,10 @@ _relevance_engine: SourceRelevanceEngine | None = None
 _correlator: Correlator | None = None
 _source_metadata: SourceMetadataManager | None = None
 
+# Cache for pending briefings awaiting source analysis
+# Key: topic string, Value: (OSINTResult, detected_region, source_metadata_map)
+_pending_briefings: dict[str, tuple] = {}
+
 
 def _get_cache() -> CacheManager:
     global _cache
@@ -360,6 +364,7 @@ async def briefing(
     topic: str,
     time_range: str | None = None,
     rigor: bool | None = None,
+    cache_id: str | None = None,
 ) -> str:
     """OSINT intelligence briefing from 65+ language sources.
 
@@ -387,6 +392,9 @@ async def briefing(
         rigor: Enable rigor mode for IC-standard output with full source
             attribution, confidence levels, and bibliography. If not specified,
             uses global IGNIFER_RIGOR_MODE setting.
+        cache_id: Internal use only. When source analysis is required, this ID
+            is returned in the instructions. Pass it back to retrieve the cached
+            briefing after completing source analysis.
 
     Returns:
         Full briefing + article extracts. Include ALL of it in Part 2.
@@ -415,50 +423,73 @@ async def briefing(
                 f'- briefing("Ukraine", time_range="last 7 days")'
             )
 
+    # Import here to avoid circular imports
+    import uuid
+    from ignifer.models import SourceMetadataEntry
+    from ignifer.source_metadata import ENRICHMENT_GDELT_BASELINE, MAX_DOMAINS_FOR_ANALYSIS
+
     try:
-        # Query the adapter
-        adapter = _get_adapter()
-        params = QueryParams(query=topic, time_range=time_range)
-        result = await adapter.query(params)
+        # Check if we have a cached pending briefing (awaiting source analysis)
+        # Use cache_id if provided, otherwise no cache lookup on fresh queries
+        cached = None
+        if cache_id and cache_id in _pending_briefings:
+            cached = _pending_briefings.get(cache_id)
 
-        # Pre-fetch source metadata for all domains
-        from ignifer.models import SourceMetadataEntry
+        if cached:
+            result, detected_region, cached_domains, original_topic, original_time_range = cached
+            logger.info(f"Using cached briefing '{cache_id}' with {len(result.results)} articles")
 
-        source_metadata_map: dict[str, SourceMetadataEntry] = {}
-        detected_region: str | None = None
-
-        if result.results:
-            # Detect region from query and results
-            detected_region = detect_region(topic, result.results)
-
-            # Get source metadata manager
+            # Re-fetch source metadata to check if analysis is now complete
             manager = _get_source_metadata()
+            source_metadata_map: dict[str, SourceMetadataEntry] = {}
 
-            # Extract unique domains and fetch/enrich metadata
-            domains = {
-                article.get("domain")
-                for article in result.results
-                if article.get("domain")
-            }
-            for domain in domains:
-                if domain:
-                    try:
-                        normalized = normalize_domain(domain)
-                        entry = await manager.get(normalized)
-                        if entry is None:
-                            # Find an article with this domain for enrichment
-                            article = next(
-                                (a for a in result.results if a.get("domain") == domain),
-                                {},
-                            )
-                            entry = await manager.enrich_from_gdelt(normalized, article)
-                        source_metadata_map[normalized] = entry
-                    except Exception as e:
-                        logger.debug(f"Failed to get metadata for {domain}: {e}")
+            for domain in cached_domains:
+                try:
+                    entry = await manager.get(domain)
+                    if entry:
+                        source_metadata_map[domain] = entry
+                except Exception as e:
+                    logger.debug(f"Failed to get metadata for {domain}: {e}")
+        else:
+            # Query the adapter (fresh query)
+            adapter = _get_adapter()
+            params = QueryParams(query=topic, time_range=time_range)
+            result = await adapter.query(params)
+
+            # Pre-fetch source metadata for all domains
+            source_metadata_map: dict[str, SourceMetadataEntry] = {}
+            detected_region: str | None = None
+
+            if result.results:
+                # Detect region from query and results
+                detected_region = detect_region(topic, result.results)
+
+                # Get source metadata manager
+                manager = _get_source_metadata()
+
+                # Extract unique domains and fetch/enrich metadata
+                domains = {
+                    article.get("domain")
+                    for article in result.results
+                    if article.get("domain")
+                }
+                for domain in domains:
+                    if domain:
+                        try:
+                            normalized = normalize_domain(domain)
+                            entry = await manager.get(normalized)
+                            if entry is None:
+                                # Find an article with this domain for enrichment
+                                article = next(
+                                    (a for a in result.results if a.get("domain") == domain),
+                                    {},
+                                )
+                                entry = await manager.enrich_from_gdelt(normalized, article)
+                            source_metadata_map[normalized] = entry
+                        except Exception as e:
+                            logger.debug(f"Failed to get metadata for {domain}: {e}")
 
         # Check if there are sources that need analysis BEFORE providing the report
-        from ignifer.source_metadata import ENRICHMENT_GDELT_BASELINE, MAX_DOMAINS_FOR_ANALYSIS
-
         unanalyzed_domains = []
         if source_metadata_map:
             # Count articles per domain for sorting
@@ -482,7 +513,7 @@ async def briefing(
             unanalyzed_domains.sort(key=lambda x: -x[3])
             unanalyzed_domains = unanalyzed_domains[:MAX_DOMAINS_FOR_ANALYSIS]
 
-        # If there are unanalyzed sources, return ONLY analysis instructions (no report)
+        # Require analysis if there are any unanalyzed sources
         if unanalyzed_domains:
             num = len(unanalyzed_domains)
             lines = []
@@ -529,10 +560,28 @@ async def briefing(
                     lines.append(f"- `set_source_orientation(\"domain\", \"<orientation>\", \"{axis}\")`")
                     lines.append("")
 
+            # Cache the briefing so the same articles are used after analysis
+            # Generate a new cache_id if we don't already have one
+            if not cache_id:
+                cache_id = str(uuid.uuid4())[:8]
+                cached_domains = list(source_metadata_map.keys())
+                _pending_briefings[cache_id] = (
+                    result, detected_region, cached_domains, topic, time_range
+                )
+                logger.info(f"Cached pending briefing '{cache_id}' with {len(cached_domains)} domains")
+
             lines.append("---")
-            lines.append(f"**After analyzing sources, call `briefing(\"{topic}\")` again to get the full report.**")
+            lines.append(f"**After analyzing sources, call:**")
+            lines.append(f'```')
+            lines.append(f'briefing("{topic}", cache_id="{cache_id}")')
+            lines.append(f'```')
 
             return "\n".join(lines)
+
+        # Analysis complete - clear cache if it exists and proceed with report
+        if cache_id and cache_id in _pending_briefings:
+            del _pending_briefings[cache_id]
+            logger.info(f"Cleared pending briefing cache '{cache_id}'")
 
         # Format the result with time_range and source metadata
         formatter = _get_formatter()

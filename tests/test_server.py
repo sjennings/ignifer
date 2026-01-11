@@ -26,7 +26,36 @@ from ignifer.models import (
     SourceAttribution,
     SourceMetadata,
 )
+from ignifer import server
 from ignifer.server import briefing, deep_dive
+from ignifer.models import SourceMetadataEntry
+
+
+@pytest.fixture(autouse=True)
+def clear_pending_briefings():
+    """Clear pending briefings cache before each test."""
+    server._pending_briefings.clear()
+    yield
+    server._pending_briefings.clear()
+
+
+@pytest.fixture(autouse=True)
+def mock_source_metadata():
+    """Mock source metadata to return already-analyzed entries."""
+    mock_manager = AsyncMock()
+    # Return an entry that's already analyzed (not ENRICHMENT_GDELT_BASELINE)
+    mock_manager.get.return_value = SourceMetadataEntry(
+        domain="test.com",
+        enrichment_source="user_override",  # Already analyzed
+        reliability="C",
+    )
+    mock_manager.enrich_from_gdelt.return_value = SourceMetadataEntry(
+        domain="test.com",
+        enrichment_source="user_override",
+        reliability="C",
+    )
+    with patch("ignifer.server._get_source_metadata", return_value=mock_manager):
+        yield mock_manager
 
 
 class TestBriefingTool:
@@ -1152,3 +1181,171 @@ class TestRigorModeResolution:
             # Should include rigor mode sections due to global setting
             assert "RIGOR MODE ANALYSIS" in result
             assert "Confidence Assessment" in result
+
+
+class TestBriefingCacheBehavior:
+    """Tests for pending briefing cache to prevent infinite loops."""
+
+    @pytest.fixture(autouse=True)
+    def clear_cache(self):
+        """Clear pending briefings cache before/after each test."""
+        server._pending_briefings.clear()
+        yield
+        server._pending_briefings.clear()
+
+    def _extract_cache_id(self, result: str) -> str:
+        """Extract the cache_id from the briefing instructions."""
+        import re
+        match = re.search(r'cache_id="([^"]+)"', result)
+        assert match, f"Could not find cache_id in result: {result}"
+        return match.group(1)
+
+    @pytest.mark.asyncio
+    async def test_unanalyzed_sources_trigger_cache(self) -> None:
+        """First call with unanalyzed sources caches the result."""
+        mock_result = OSINTResult(
+            status=ResultStatus.SUCCESS,
+            query="TestTopic",
+            results=[{"title": "Article 1", "domain": "newsite.com"}],
+            sources=[],
+            retrieved_at=datetime.now(timezone.utc),
+        )
+
+        # Create mock that returns unanalyzed source metadata
+        from ignifer.source_metadata import ENRICHMENT_GDELT_BASELINE
+        unanalyzed_entry = SourceMetadataEntry(
+            domain="newsite.com",
+            enrichment_source=ENRICHMENT_GDELT_BASELINE,  # Needs analysis
+        )
+        mock_manager = AsyncMock()
+        mock_manager.get.return_value = None  # Not in DB yet
+        mock_manager.enrich_from_gdelt.return_value = unanalyzed_entry
+
+        with (
+            patch("ignifer.server._get_adapter") as mock_adapter,
+            patch("ignifer.server._get_source_metadata", return_value=mock_manager),
+        ):
+            adapter_instance = AsyncMock()
+            adapter_instance.query.return_value = mock_result
+            mock_adapter.return_value = adapter_instance
+
+            result = await briefing.fn("TestTopic")
+
+            # Should return analysis instructions with cache_id
+            assert "Source Analysis Required" in result
+            assert "newsite.com" in result
+            assert "cache_id=" in result
+
+            # Extract cache_id and verify it's in the cache
+            cache_id = self._extract_cache_id(result)
+            assert cache_id in server._pending_briefings
+            cached = server._pending_briefings[cache_id]
+            # (result, region, domains, topic, time_range)
+            assert len(cached) == 5
+            assert cached[0] == mock_result
+            assert cached[3] == "TestTopic"
+
+    @pytest.mark.asyncio
+    async def test_second_call_with_cache_id_uses_cached_result(self) -> None:
+        """Second call with cache_id uses cached GDELT results instead of re-querying."""
+        mock_result = OSINTResult(
+            status=ResultStatus.SUCCESS,
+            query="CachedTopic",
+            results=[
+                {"title": "Cached Article", "domain": "cached.com"},
+                {"title": "Another Article", "domain": "other.com"},
+            ],
+            sources=[],
+            retrieved_at=datetime.now(timezone.utc),
+        )
+
+        from ignifer.source_metadata import ENRICHMENT_GDELT_BASELINE
+        unanalyzed_entry = SourceMetadataEntry(
+            domain="cached.com",
+            enrichment_source=ENRICHMENT_GDELT_BASELINE,
+        )
+        mock_manager = AsyncMock()
+        mock_manager.get.return_value = unanalyzed_entry
+        mock_manager.enrich_from_gdelt.return_value = unanalyzed_entry
+
+        with (
+            patch("ignifer.server._get_adapter") as mock_adapter,
+            patch("ignifer.server._get_source_metadata", return_value=mock_manager),
+        ):
+            adapter_instance = AsyncMock()
+            adapter_instance.query.return_value = mock_result
+            mock_adapter.return_value = adapter_instance
+
+            # First call - get cache_id
+            result1 = await briefing.fn("CachedTopic")
+            assert "Source Analysis Required" in result1
+            cache_id = self._extract_cache_id(result1)
+            call_count_1 = adapter_instance.query.call_count
+
+            # Second call WITH cache_id - should NOT query GDELT again
+            result2 = await briefing.fn("CachedTopic", cache_id=cache_id)
+            assert "Source Analysis Required" in result2
+            call_count_2 = adapter_instance.query.call_count
+
+            # GDELT should only have been called once
+            assert call_count_2 == call_count_1 == 1
+
+    @pytest.mark.asyncio
+    async def test_analyzed_sources_clear_cache_and_return_report(self) -> None:
+        """After sources are analyzed, cache is cleared and full report returned."""
+        mock_result = OSINTResult(
+            status=ResultStatus.SUCCESS,
+            query="AnalyzedTopic",
+            results=[{"title": "Test Article", "domain": "analyzed.com"}],
+            sources=[
+                SourceAttribution(
+                    source="gdelt",
+                    quality=QualityTier.MEDIUM,
+                    confidence=ConfidenceLevel.LIKELY,
+                    metadata=SourceMetadata(
+                        source_name="gdelt",
+                        source_url="https://api.gdeltproject.org/",
+                        retrieved_at=datetime.now(timezone.utc),
+                    ),
+                )
+            ],
+            retrieved_at=datetime.now(timezone.utc),
+        )
+
+        from ignifer.source_metadata import ENRICHMENT_GDELT_BASELINE
+        unanalyzed_entry = SourceMetadataEntry(
+            domain="analyzed.com",
+            enrichment_source=ENRICHMENT_GDELT_BASELINE,
+        )
+        analyzed_entry = SourceMetadataEntry(
+            domain="analyzed.com",
+            enrichment_source="user_override",  # Now analyzed
+            reliability="C",
+        )
+
+        mock_manager = AsyncMock()
+        # First call returns unanalyzed, second call returns analyzed
+        mock_manager.get.side_effect = [None, analyzed_entry]
+        mock_manager.enrich_from_gdelt.return_value = unanalyzed_entry
+
+        with (
+            patch("ignifer.server._get_adapter") as mock_adapter,
+            patch("ignifer.server._get_source_metadata", return_value=mock_manager),
+        ):
+            adapter_instance = AsyncMock()
+            adapter_instance.query.return_value = mock_result
+            mock_adapter.return_value = adapter_instance
+
+            # First call - should cache and return instructions
+            result1 = await briefing.fn("AnalyzedTopic")
+            assert "Source Analysis Required" in result1
+            cache_id = self._extract_cache_id(result1)
+            assert cache_id in server._pending_briefings
+
+            # Second call WITH cache_id - sources now analyzed, should return report
+            result2 = await briefing.fn("AnalyzedTopic", cache_id=cache_id)
+            assert "INTELLIGENCE BRIEFING" in result2
+            assert "ANALYZEDTOPIC" in result2
+
+            # Cache should be cleared
+            assert cache_id not in server._pending_briefings
